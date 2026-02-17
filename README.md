@@ -114,6 +114,7 @@ The agent has built-in tools that the LLM can automatically call to perform acti
 
 | Tool | Description |
 |------|-------------|
+| `shell` | Execute shell commands with pipes (`\|`) and redirections (`>`) support |
 | `date` | Get current date/time with optional format |
 | `ls` | List directory contents |
 | `cat` | Read file contents (limited to 1000 lines) |
@@ -127,6 +128,8 @@ The agent has built-in tools that the LLM can automatically call to perform acti
 | `tail` | Read last N lines of a file |
 | `df` | Show disk space usage |
 | `uname` | Get system information |
+
+**Note**: Use the `shell` tool for complex commands that need pipes, redirections, or other shell features.
 
 ### How Tools Work
 

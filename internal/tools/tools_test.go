@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -161,5 +162,43 @@ func TestToOpenAIFormat(t *testing.T) {
 		if fn["description"] == "" {
 			t.Error("function description should not be empty")
 		}
+	}
+}
+
+func TestShellTool(t *testing.T) {
+	registry := NewRegistry()
+
+	call := &ToolCall{
+		ID:   "test-shell",
+		Name: "shell",
+		Args: map[string]interface{}{"command": "echo hello"},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if result.Output != "hello" {
+		t.Errorf("expected output 'hello', got %s", result.Output)
+	}
+}
+
+func TestShellToolWithPipe(t *testing.T) {
+	registry := NewRegistry()
+
+	call := &ToolCall{
+		ID:   "test-shell-pipe",
+		Name: "shell",
+		Args: map[string]interface{}{"command": "echo -e 'line1\nline2\nline3' | grep line2"},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "line2") {
+		t.Errorf("expected output to contain 'line2', got %s", result.Output)
 	}
 }

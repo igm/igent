@@ -512,6 +512,68 @@ func (r *Registry) registerDefaults() {
 			return runCommand("uname")
 		},
 	})
+
+	// shell - Execute shell commands with pipes and redirections
+	r.Register(&Tool{
+		Name:        "shell",
+		Description: "Execute a shell command. Supports pipes (|), redirections (>), and other shell features. Use this for complex commands that need shell processing.",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"command": map[string]interface{}{
+					"type":        "string",
+					"description": "The shell command to execute (supports pipes, redirections, etc.)",
+				},
+				"timeout": map[string]interface{}{
+					"type":        "integer",
+					"description": "Timeout in seconds (default: 30, max: 120)",
+				},
+			},
+			"required": []string{"command"},
+		},
+		Executor: func(args map[string]interface{}) (string, error) {
+			command, ok := args["command"].(string)
+			if !ok || command == "" {
+				return "", fmt.Errorf("command is required")
+			}
+
+			timeout := 30
+			if t, ok := args["timeout"].(float64); ok && t > 0 {
+				timeout = int(t)
+				if timeout > 120 {
+					timeout = 120
+				}
+			}
+
+			// Use sh -c for Unix-like systems
+			shell := "/bin/sh"
+			if _, err := os.Stat("/bin/sh"); os.IsNotExist(err) {
+				// Fallback for non-Unix systems
+				shell = "sh"
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+			defer cancel()
+
+			cmd := exec.CommandContext(ctx, shell, "-c", command)
+			cmd.Env = os.Environ()
+
+			output, err := cmd.CombinedOutput()
+			if ctx.Err() == context.DeadlineExceeded {
+				return "", fmt.Errorf("command timed out after %d seconds", timeout)
+			}
+			if err != nil {
+				return string(output), fmt.Errorf("command failed: %w", err)
+			}
+
+			result := strings.TrimSpace(string(output))
+			if len(result) > 15000 {
+				result = result[:15000] + "\n... (output truncated)"
+			}
+
+			return result, nil
+		},
+	})
 }
 
 // ParseToolCall parses a tool call from LLM response
