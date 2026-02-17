@@ -16,9 +16,11 @@ igent/
 │   │   └── zhipu.go         # Z.AI/GLM provider wrapper
 │   ├── memory/memory.go     # Context optimization, summarization
 │   ├── skills/skills.go     # Skill registry with pattern matching
-│   └── storage/
-│       ├── storage.go       # Storage interface
-│       └── json_store.go    # JSON file persistence
+│   ├── storage/
+│   │   ├── storage.go       # Storage interface
+│   │   └── json_store.go    # JSON file persistence
+│   └── tools/
+│       └── tools.go         # Tool registry & execution
 ├── Makefile
 ├── go.mod
 ├── README.md
@@ -34,7 +36,36 @@ The core orchestrator that:
 - Builds context with memory optimization
 - Constructs system prompts with current date/time
 - Manages streaming and non-streaming responses
+- Orchestrates tool calls (agentic loop)
 - Provides interactive REPL with slash commands
+
+**Tool Calling Flow:**
+```go
+func (a *Agent) ChatStream(ctx context.Context, userInput string, onChunk func(string)) (string, error) {
+    // Build context and messages...
+    // Build tool definitions from registry
+    toolDefs := a.buildToolDefinitions()
+
+    // Agentic loop: keep calling LLM until we get a text response
+    for iteration < maxIterations {
+        // Get response from LLM with tools
+        resp, err := a.provider.CompleteWithOptions(ctx, fullMessages, &llm.CompleteOptions{Tools: toolDefs})
+
+        // If no tool calls, we have our final response
+        if !resp.HasToolCalls() {
+            return resp.Content, nil
+        }
+
+        // Execute each tool and add result to messages
+        for _, tc := range resp.ToolCalls {
+            result := a.tools.Execute(ctx, call)
+            fullMessages = append(fullMessages, llm.Message{
+                Role: "tool", ToolCallID: tc.ID, Content: result.Output,
+            })
+        }
+    }
+}
+```
 
 **System Prompt Construction:**
 ```go
@@ -49,9 +80,31 @@ func (a *Agent) buildSystemPrompt() string {
 
 ### 2. LLM Provider (`internal/llm/`)
 
-- **Interface**: `Provider` with `Complete`, `Stream`, `CountTokens` methods
+- **Interface**: `Provider` with `Complete`, `CompleteWithOptions`, `Stream`, `CountTokens` methods
 - **Implementations**: OpenAI-compatible (works with OpenAI, Z.AI, GLM, etc.)
 - **Registry pattern**: Add new providers via `Register(name, factory)`
+- **Tool support**: `CompleteWithOptions` accepts tools and returns tool calls
+
+**Provider Interface:**
+```go
+type Provider interface {
+    Complete(ctx context.Context, messages []Message) (*Response, error)
+    CompleteWithOptions(ctx context.Context, messages []Message, opts *CompleteOptions) (*Response, error)
+    Stream(ctx context.Context, messages []Message, onChunk func(string)) error
+    CountTokens(messages []Message) int
+}
+```
+
+**Message with Tool Calls:**
+```go
+type Message struct {
+    Role       string     `json:"role"`                  // system, user, assistant, tool
+    Content    string     `json:"content"`
+    ToolCalls  []ToolCall `json:"tool_calls,omitempty"`  // For assistant messages
+    ToolCallID string     `json:"tool_call_id,omitempty"` // For tool response messages
+    Name       string     `json:"name,omitempty"`         // Tool name for tool role
+}
+```
 
 **Adding a new provider:**
 ```go
@@ -86,6 +139,66 @@ func init() {
 - **Pattern matching** for skill activation
 - **Prompt enhancement**: Skills inject context into system prompt
 - **Default skills**: `code`, `explain`, `summarize`
+
+### 6. Tools (`internal/tools/`)
+
+The tools system allows the LLM to execute CLI commands:
+
+**Tool Structure:**
+```go
+type Tool struct {
+    Name        string
+    Description string
+    Parameters  map[string]interface{} // JSON Schema
+    Executor    func(args map[string]interface{}) (string, error)
+}
+```
+
+**Built-in Tools:**
+| Tool | Description |
+|------|-------------|
+| `date` | Get current date/time |
+| `ls` | List directory contents |
+| `cat` | Read file contents |
+| `pwd` | Get working directory |
+| `ps` | List processes |
+| `curl` | Make HTTP requests |
+| `which` | Find command location |
+| `echo` | Echo text (testing) |
+| `env` | List environment variables |
+| `head` | Read first N lines |
+| `tail` | Read last N lines |
+| `df` | Show disk space |
+| `uname` | System information |
+
+**Adding a Custom Tool:**
+```go
+registry.Register(&Tool{
+    Name:        "my_tool",
+    Description: "Does something useful",
+    Parameters: map[string]interface{}{
+        "type": "object",
+        "properties": map[string]interface{}{
+            "input": map[string]interface{}{
+                "type": "string",
+                "description": "Input parameter",
+            },
+        },
+        "required": []string{"input"},
+    },
+    Executor: func(args map[string]interface{}) (string, error) {
+        input := args["input"].(string)
+        return "processed: " + input, nil
+    },
+})
+```
+
+**Tool Execution Flow:**
+1. LLM receives tool definitions in request
+2. LLM responds with `tool_calls` if it needs to use a tool
+3. Agent executes each tool via `registry.Execute(ctx, call)`
+4. Tool results are added as `role: "tool"` messages
+5. Loop continues until LLM returns text response
 
 ## Configuration
 

@@ -5,6 +5,7 @@ A simple, extensible AI agent in Go with persistent context and intelligent memo
 ## Features
 
 - **Multiple LLM Providers**: OpenAI, Z.AI, GLM-5, and any OpenAI-compatible API
+- **Tool Support**: Built-in CLI tools (date, ls, ps, curl, etc.) that the LLM can call
 - **Persistent Storage**: JSON-based storage for portability
 - **Context Optimization**: Automatic summarization and sliding window to keep context relevant
 - **Memory System**: Store and retrieve important facts, preferences, and context
@@ -100,8 +101,53 @@ igent skill list        # List skills
 > /memory               # Show memories
 > /memory add fact "..." # Add memory
 > /skills               # List skills
+> /tools                # List available tools
 > /clear                # Clear screen
 > /exit                 # Exit
+```
+
+## Tool System
+
+The agent has built-in tools that the LLM can automatically call to perform actions:
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `date` | Get current date/time with optional format |
+| `ls` | List directory contents |
+| `cat` | Read file contents (limited to 1000 lines) |
+| `pwd` | Get current working directory |
+| `ps` | List running processes |
+| `curl` | Make HTTP requests |
+| `which` | Find command location |
+| `echo` | Echo text (for testing) |
+| `env` | List environment variables |
+| `head` | Read first N lines of a file |
+| `tail` | Read last N lines of a file |
+| `df` | Show disk space usage |
+| `uname` | Get system information |
+
+### How Tools Work
+
+1. When you ask a question that requires real-time data, the LLM requests a tool call
+2. The agent executes the tool locally
+3. Results are fed back to the LLM for processing
+4. The LLM provides a final response based on tool results
+
+Example:
+```
+> What's the current date and time?
+[LLM calls date tool]
+The current date and time is Monday, February 17, 2026 at 2:30 PM UTC.
+
+> List files in the current directory
+[LLM calls ls tool]
+Here are the files in /Users/you/project:
+- README.md (1.2K)
+- main.go (3.4K)
+- go.mod (0.5K)
+...
 ```
 
 ## Supported Providers
@@ -136,12 +182,13 @@ provider:
 igent/
 ├── cmd/igent/           # CLI entry point
 ├── internal/
-│   ├── agent/           # Core agent logic
+│   ├── agent/           # Core agent logic & tool orchestration
 │   ├── config/          # Configuration management
 │   ├── llm/             # LLM provider abstraction
 │   ├── memory/          # Context & memory optimization
 │   ├── skills/          # Skill system
-│   └── storage/         # Persistence layer
+│   ├── storage/         # Persistence layer
+│   └── tools/           # Tool registry & execution
 ```
 
 ## Context Optimization

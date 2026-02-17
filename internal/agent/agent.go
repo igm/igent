@@ -17,6 +17,7 @@ import (
 	"github.com/igm/igent/internal/memory"
 	"github.com/igm/igent/internal/skills"
 	"github.com/igm/igent/internal/storage"
+	"github.com/igm/igent/internal/tools"
 )
 
 // Agent represents the AI agent
@@ -26,6 +27,7 @@ type Agent struct {
 	store          *storage.JSONStore
 	memory         *memory.Manager
 	skills         *skills.Registry
+	tools          *tools.Registry
 	conversationID string
 	log            *slog.Logger
 }
@@ -92,6 +94,10 @@ func New(cfg *config.Config) (*Agent, error) {
 		return nil, fmt.Errorf("loading default skills: %w", err)
 	}
 
+	// Initialize tools registry
+	toolRegistry := tools.NewRegistry()
+	log.Debug("tools registry initialized", "tool_count", len(toolRegistry.List()))
+
 	log.Info("agent ready", "name", cfg.Agent.Name)
 
 	return &Agent{
@@ -100,6 +106,7 @@ func New(cfg *config.Config) (*Agent, error) {
 		store:    store,
 		memory:   memMgr,
 		skills:   skillRegistry,
+		tools:    toolRegistry,
 		log:      log,
 	}, nil
 }
@@ -180,40 +187,117 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string, onChunk func(s
 	fullMessages := []llm.Message{{Role: "system", Content: systemPrompt}}
 	fullMessages = append(fullMessages, messages...)
 
-	// Get response from LLM
+	// Add user message
+	fullMessages = append(fullMessages, llm.Message{Role: "user", Content: userInput})
+
+	// Build tool definitions
+	toolDefs := a.buildToolDefinitions()
+	a.log.Debug("tools prepared", "tool_count", len(toolDefs))
+
+	// Agentic loop: keep calling LLM until we get a text response
+	maxIterations := 10
+	iteration := 0
 	var response string
+	var toolCallsMade []llm.ToolCall
+
 	startTime := time.Now()
 
-	if onChunk != nil {
-		// Streaming mode
-		a.log.Debug("starting streaming response")
-		var fullResponse strings.Builder
-		err = a.provider.Stream(ctx, fullMessages, func(chunk string) {
-			fullResponse.WriteString(chunk)
-			onChunk(chunk)
-		})
-		response = fullResponse.String()
-	} else {
-		// Non-streaming mode
-		a.log.Debug("starting non-streaming response")
-		resp, err := a.provider.Complete(ctx, fullMessages)
+	for iteration < maxIterations {
+		iteration++
+		a.log.Debug("agent loop iteration", "iteration", iteration)
+
+		// Get response from LLM with tools
+		opts := &llm.CompleteOptions{Tools: toolDefs}
+		resp, err := a.provider.CompleteWithOptions(ctx, fullMessages, opts)
 		if err != nil {
 			return "", fmt.Errorf("LLM completion: %w", err)
 		}
-		response = resp.Content
+
+		// If no tool calls, we have our final response
+		if !resp.HasToolCalls() {
+			response = resp.Content
+			break
+		}
+
+		// Handle tool calls
+		a.log.Info("processing tool calls", "count", len(resp.ToolCalls))
+		toolCallsMade = resp.ToolCalls
+
+		// Add assistant message with tool calls to conversation
+		fullMessages = append(fullMessages, llm.Message{
+			Role:      "assistant",
+			Content:   resp.Content,
+			ToolCalls: resp.ToolCalls,
+		})
+
+		// Execute each tool and add result to messages
+		for _, tc := range resp.ToolCalls {
+			if tc.Function == nil {
+				continue
+			}
+
+			// Parse tool call
+			call, err := tools.ParseToolCall(tc.ID, tc.Function.Name, tc.Function.Arguments)
+			if err != nil {
+				a.log.Error("failed to parse tool call", "error", err)
+				fullMessages = append(fullMessages, llm.Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
+					Content:    fmt.Sprintf("Error parsing tool arguments: %v", err),
+				})
+				continue
+			}
+
+			// Execute tool
+			result := a.tools.Execute(ctx, call)
+
+			// Format result for LLM
+			var resultContent string
+			if result.Error != "" {
+				resultContent = fmt.Sprintf("Error: %s", result.Error)
+			} else {
+				resultContent = result.Output
+			}
+
+			a.log.Info("tool executed",
+				"tool", call.Name,
+				"success", result.Error == "",
+				"output_length", len(resultContent),
+			)
+
+			// Add tool result to messages
+			fullMessages = append(fullMessages, llm.Message{
+				Role:       "tool",
+				ToolCallID: tc.ID,
+				Name:       tc.Function.Name,
+				Content:    resultContent,
+			})
+		}
 	}
 
-	if err != nil {
-		return "", fmt.Errorf("LLM error: %w", err)
+	if iteration >= maxIterations {
+		return "", fmt.Errorf("max tool iterations reached (%d)", maxIterations)
 	}
 
 	duration := time.Since(startTime)
 	a.log.Info("chat completed",
 		"response_length", len(response),
+		"iterations", iteration,
+		"tool_calls", len(toolCallsMade),
 		"duration_ms", duration.Milliseconds(),
 	)
 
+	// Stream the response if callback provided
+	if onChunk != nil && response != "" {
+		// For streaming, we already have the full response, so send it in chunks
+		// In a real implementation, we might want to chunk this more naturally
+		onChunk(response)
+	}
+
 	// Save messages to conversation
+	// Note: We save the simplified version (user + assistant) for conversation history
+	// The tool call details are kept in the session but simplified for storage
 	conv.Messages = append(conv.Messages,
 		llm.Message{Role: "user", Content: userInput},
 		llm.Message{Role: "assistant", Content: response},
@@ -225,6 +309,25 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string, onChunk func(s
 	a.log.Debug("conversation saved", "total_messages", len(conv.Messages))
 
 	return response, nil
+}
+
+// buildToolDefinitions converts tool registry to LLM tool definitions
+func (a *Agent) buildToolDefinitions() []llm.ToolDefinition {
+	toolList := a.tools.List()
+	defs := make([]llm.ToolDefinition, len(toolList))
+
+	for i, t := range toolList {
+		defs[i] = llm.ToolDefinition{
+			Type: "function",
+			Function: &llm.ToolFunctionDef{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  t.Parameters,
+			},
+		}
+	}
+
+	return defs
 }
 
 // ListConversations returns all conversation IDs
@@ -331,6 +434,7 @@ func (a *Agent) handleCommand(ctx context.Context, input string) {
   /memory        - List memories
   /memory add <type> <content> - Add memory
   /skills        - List skills
+  /tools         - List available tools
   /clear         - Clear screen
   /exit          - Exit`)
 
@@ -412,6 +516,13 @@ func (a *Agent) handleCommand(ctx context.Context, input string) {
 		fmt.Println("Skills:")
 		for _, s := range skills {
 			fmt.Printf("  %s: %s\n", s.Name, s.Description)
+		}
+
+	case "/tools":
+		tools := a.tools.List()
+		fmt.Println("Available Tools:")
+		for _, t := range tools {
+			fmt.Printf("  %s: %s\n", t.Name, t.Description)
 		}
 
 	case "/clear":

@@ -18,6 +18,10 @@ func (m *mockProvider) Complete(ctx context.Context, messages []llm.Message) (*l
 	return &llm.Response{Content: m.response}, nil
 }
 
+func (m *mockProvider) CompleteWithOptions(ctx context.Context, messages []llm.Message, opts *llm.CompleteOptions) (*llm.Response, error) {
+	return &llm.Response{Content: m.response}, nil
+}
+
 func (m *mockProvider) Stream(ctx context.Context, messages []llm.Message, onChunk func(string)) error {
 	onChunk(m.response)
 	return nil

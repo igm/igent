@@ -53,11 +53,12 @@ func NewOpenAIProvider(cfg ProviderConfig) (Provider, error) {
 }
 
 type openAIRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Stream      bool      `json:"stream,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
-	Temperature float64   `json:"temperature,omitempty"`
+	Model       string           `json:"model"`
+	Messages    []openAIMessage  `json:"messages"`
+	Stream      bool             `json:"stream,omitempty"`
+	MaxTokens   int              `json:"max_tokens,omitempty"`
+	Temperature float64          `json:"temperature,omitempty"`
+	Tools       []ToolDefinition `json:"tools,omitempty"`
 }
 
 type openAIResponse struct {
@@ -66,10 +67,10 @@ type openAIResponse struct {
 	Created int64  `json:"created"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Index        int     `json:"index"`
-		Message      Message `json:"message"`
-		Delta        Message `json:"delta"`
-		FinishReason string  `json:"finish_reason"`
+		Index        int           `json:"index"`
+		Message      openAIMessage `json:"message"`
+		Delta        openAIMessage `json:"delta"`
+		FinishReason string        `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -83,14 +84,69 @@ type openAIResponse struct {
 	} `json:"error,omitempty"`
 }
 
+// openAIMessage matches OpenAI's message format
+type openAIMessage struct {
+	Role       string           `json:"role"`
+	Content    string           `json:"content,omitempty"`
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+	Name       string           `json:"name,omitempty"`
+}
+
+// openAIToolCall matches OpenAI's tool call format
+type openAIToolCall struct {
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`
+	Function openAIToolCallFunction `json:"function"`
+}
+
+type openAIToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
 // Complete sends a completion request
 func (p *OpenAIProvider) Complete(ctx context.Context, messages []Message) (*Response, error) {
+	return p.CompleteWithOptions(ctx, messages, nil)
+}
+
+// CompleteWithOptions sends a completion request with optional tools
+func (p *OpenAIProvider) CompleteWithOptions(ctx context.Context, messages []Message, opts *CompleteOptions) (*Response, error) {
 	startTime := time.Now()
 	p.log.Debug("sending completion request", "message_count", len(messages))
 
+	// Convert messages to OpenAI format
+	openAIMessages := make([]openAIMessage, len(messages))
+	for i, m := range messages {
+		openAIMessages[i] = openAIMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+			Name:       m.Name,
+		}
+		if len(m.ToolCalls) > 0 {
+			openAIMessages[i].ToolCalls = make([]openAIToolCall, len(m.ToolCalls))
+			for j, tc := range m.ToolCalls {
+				openAIMessages[i].ToolCalls[j] = openAIToolCall{
+					ID:   tc.ID,
+					Type: tc.Type,
+					Function: openAIToolCallFunction{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
+				}
+			}
+		}
+	}
+
 	reqBody := openAIRequest{
 		Model:    p.model,
-		Messages: messages,
+		Messages: openAIMessages,
+	}
+
+	if opts != nil && len(opts.Tools) > 0 {
+		reqBody.Tools = opts.Tools
+		p.log.Debug("request includes tools", "tool_count", len(opts.Tools))
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -132,19 +188,39 @@ func (p *OpenAIProvider) Complete(ctx context.Context, messages []Message) (*Res
 		return nil, fmt.Errorf("no choices in response")
 	}
 
+	choice := result.Choices[0]
+	response := &Response{
+		Content:      choice.Message.Content,
+		TokensUsed:   result.Usage.TotalTokens,
+		FinishReason: choice.FinishReason,
+	}
+
+	// Parse tool calls if present
+	if len(choice.Message.ToolCalls) > 0 {
+		response.ToolCalls = make([]ToolCall, len(choice.Message.ToolCalls))
+		for i, tc := range choice.Message.ToolCalls {
+			response.ToolCalls[i] = ToolCall{
+				ID:   tc.ID,
+				Type: tc.Type,
+				Function: &ToolCallFunction{
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				},
+			}
+		}
+		p.log.Info("response includes tool calls", "count", len(response.ToolCalls))
+	}
+
 	duration := time.Since(startTime)
 	p.log.Info("completion received",
 		"tokens_used", result.Usage.TotalTokens,
 		"prompt_tokens", result.Usage.PromptTokens,
 		"completion_tokens", result.Usage.CompletionTokens,
 		"duration_ms", duration.Milliseconds(),
+		"finish_reason", choice.FinishReason,
 	)
 
-	return &Response{
-		Content:      result.Choices[0].Message.Content,
-		TokensUsed:   result.Usage.TotalTokens,
-		FinishReason: result.Choices[0].FinishReason,
-	}, nil
+	return response, nil
 }
 
 // Stream sends a streaming completion request
@@ -152,9 +228,33 @@ func (p *OpenAIProvider) Stream(ctx context.Context, messages []Message, onChunk
 	startTime := time.Now()
 	p.log.Debug("starting stream request", "message_count", len(messages))
 
+	// Convert messages to OpenAI format
+	openAIMessages := make([]openAIMessage, len(messages))
+	for i, m := range messages {
+		openAIMessages[i] = openAIMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+			Name:       m.Name,
+		}
+		if len(m.ToolCalls) > 0 {
+			openAIMessages[i].ToolCalls = make([]openAIToolCall, len(m.ToolCalls))
+			for j, tc := range m.ToolCalls {
+				openAIMessages[i].ToolCalls[j] = openAIToolCall{
+					ID:   tc.ID,
+					Type: tc.Type,
+					Function: openAIToolCallFunction{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
+				}
+			}
+		}
+	}
+
 	reqBody := openAIRequest{
 		Model:    p.model,
-		Messages: messages,
+		Messages: openAIMessages,
 		Stream:   true,
 	}
 
