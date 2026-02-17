@@ -77,17 +77,41 @@ type openAIResponse struct {
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
 	} `json:"usage"`
-	Error *struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
-		Code    string `json:"code"`
-	} `json:"error,omitempty"`
+	Error *openAIError `json:"error,omitempty"`
+}
+
+// openAIError handles both string and object error formats from different APIs
+type openAIError struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    string `json:"code"`
+	Raw     string `json:"-"` // For string errors
+}
+
+func (e *openAIError) Error() string {
+	if e.Raw != "" {
+		return e.Raw
+	}
+	return e.Message
+}
+
+func (e *openAIError) UnmarshalJSON(data []byte) error {
+	// Try as string first
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		e.Raw = str
+		return nil
+	}
+
+	// Try as object
+	type alias openAIError
+	return json.Unmarshal(data, (*alias)(e))
 }
 
 // openAIMessage matches OpenAI's message format
 type openAIMessage struct {
 	Role       string           `json:"role"`
-	Content    string           `json:"content,omitempty"`
+	Content    string           `json:"content"` // Always include content, even if empty
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 	Name       string           `json:"name,omitempty"`
@@ -180,8 +204,8 @@ func (p *OpenAIProvider) CompleteWithOptions(ctx context.Context, messages []Mes
 	}
 
 	if result.Error != nil {
-		p.log.Error("API error", "message", result.Error.Message, "type", result.Error.Type)
-		return nil, fmt.Errorf("API error: %s", result.Error.Message)
+		p.log.Error("API error", "message", result.Error.Error(), "type", result.Error.Type)
+		return nil, fmt.Errorf("API error: %s", result.Error.Error())
 	}
 
 	if len(result.Choices) == 0 {
