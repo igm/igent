@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/igm/igent/internal/logger"
 	"github.com/spf13/viper"
 )
 
@@ -15,6 +16,7 @@ type Config struct {
 	Storage  StorageConfig  `mapstructure:"storage"`
 	Context  ContextConfig  `mapstructure:"context"`
 	Agent    AgentConfig    `mapstructure:"agent"`
+	Logging  LoggingConfig  `mapstructure:"logging"`
 }
 
 // ProviderConfig holds LLM provider settings
@@ -43,6 +45,12 @@ type AgentConfig struct {
 	Name         string `mapstructure:"name"`
 }
 
+// LoggingConfig holds logging settings
+type LoggingConfig struct {
+	Level  string `mapstructure:"level"`  // debug, info, warn, error
+	Format string `mapstructure:"format"` // text, json
+}
+
 // DefaultConfig returns sensible defaults
 func DefaultConfig() *Config {
 	home, _ := os.UserHomeDir()
@@ -65,6 +73,10 @@ func DefaultConfig() *Config {
 		Agent: AgentConfig{
 			Name:         "igent",
 			SystemPrompt: "You are a helpful AI assistant. Be concise and accurate.",
+		},
+		Logging: LoggingConfig{
+			Level:  string(logger.LevelInfo),
+			Format: string(logger.FormatText),
 		},
 	}
 }
@@ -96,6 +108,8 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("context.summarize_when", cfg.Context.SummarizeWhen)
 	v.SetDefault("agent.name", cfg.Agent.Name)
 	v.SetDefault("agent.system_prompt", cfg.Agent.SystemPrompt)
+	v.SetDefault("logging.level", cfg.Logging.Level)
+	v.SetDefault("logging.format", cfg.Logging.Format)
 
 	// Environment variable overrides
 	v.SetEnvPrefix("IGENT")
@@ -162,6 +176,10 @@ func (c *Config) Save() error {
 		"agent": map[string]interface{}{
 			"name":          c.Agent.Name,
 			"system_prompt": c.Agent.SystemPrompt,
+		},
+		"logging": map[string]interface{}{
+			"level":  c.Logging.Level,
+			"format": c.Logging.Format,
 		},
 	}
 

@@ -3,27 +3,36 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/igm/igent/internal/llm"
+	"github.com/igm/igent/internal/logger"
 )
 
 // JSONStore implements Storage using JSON files
 type JSONStore struct {
 	baseDir string
 	mu      sync.RWMutex
+	log     *slog.Logger
 }
 
 // NewJSONStore creates a new JSON-based storage
 func NewJSONStore(baseDir string) (*JSONStore, error) {
+	log := logger.L().With("component", "storage")
+
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return nil, fmt.Errorf("creating storage directory: %w", err)
 	}
+	log.Debug("storage directory created", "path", baseDir)
 
-	store := &JSONStore{baseDir: baseDir}
+	store := &JSONStore{
+		baseDir: baseDir,
+		log:     log,
+	}
 
 	// Ensure subdirectories exist
 	for _, sub := range []string{"messages", "memory", "skills"} {
@@ -31,6 +40,7 @@ func NewJSONStore(baseDir string) (*JSONStore, error) {
 			return nil, err
 		}
 	}
+	log.Debug("storage subdirectories ensured")
 
 	return store, nil
 }
@@ -76,7 +86,12 @@ func (s *JSONStore) SaveConversation(conv *Conversation) error {
 		return fmt.Errorf("marshaling conversation: %w", err)
 	}
 
-	return os.WriteFile(path, data, 0644)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return err
+	}
+
+	s.log.Debug("conversation saved", "id", conv.ID, "message_count", len(conv.Messages))
+	return nil
 }
 
 // LoadConversation loads a conversation by ID
@@ -98,6 +113,7 @@ func (s *JSONStore) LoadConversation(id string) (*Conversation, error) {
 		return nil, fmt.Errorf("unmarshaling conversation: %w", err)
 	}
 
+	s.log.Debug("conversation loaded", "id", id, "message_count", len(conv.Messages))
 	return &conv, nil
 }
 
@@ -127,7 +143,12 @@ func (s *JSONStore) DeleteConversation(id string) error {
 	defer s.mu.Unlock()
 
 	path := filepath.Join(s.baseDir, "messages", id+".json")
-	return os.Remove(path)
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+
+	s.log.Info("conversation deleted", "id", id)
+	return nil
 }
 
 // SaveMemory stores a memory item
@@ -141,7 +162,12 @@ func (s *JSONStore) SaveMemory(item *MemoryItem) error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return err
+	}
+
+	s.log.Debug("memory saved", "id", item.ID, "type", item.Type)
+	return nil
 }
 
 // LoadMemories loads all memory items
@@ -174,6 +200,7 @@ func (s *JSONStore) LoadMemories() ([]*MemoryItem, error) {
 		memories = append(memories, &item)
 	}
 
+	s.log.Debug("memories loaded", "count", len(memories))
 	return memories, nil
 }
 
@@ -183,7 +210,12 @@ func (s *JSONStore) DeleteMemory(id string) error {
 	defer s.mu.Unlock()
 
 	path := filepath.Join(s.baseDir, "memory", id+".json")
-	return os.Remove(path)
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+
+	s.log.Info("memory deleted", "id", id)
+	return nil
 }
 
 // SaveSkill stores a skill
@@ -197,7 +229,12 @@ func (s *JSONStore) SaveSkill(skill *Skill) error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return err
+	}
+
+	s.log.Debug("skill saved", "id", skill.ID, "name", skill.Name)
+	return nil
 }
 
 // LoadSkills loads all skills
@@ -230,6 +267,7 @@ func (s *JSONStore) LoadSkills() ([]*Skill, error) {
 		skills = append(skills, &skill)
 	}
 
+	s.log.Debug("skills loaded", "count", len(skills))
 	return skills, nil
 }
 
@@ -239,5 +277,10 @@ func (s *JSONStore) DeleteSkill(id string) error {
 	defer s.mu.Unlock()
 
 	path := filepath.Join(s.baseDir, "skills", id+".json")
-	return os.Remove(path)
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+
+	s.log.Info("skill deleted", "id", id)
+	return nil
 }

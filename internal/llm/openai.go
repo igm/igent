@@ -7,9 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/igm/igent/internal/logger"
 )
 
 func init() {
@@ -24,6 +27,7 @@ type OpenAIProvider struct {
 	apiKey  string
 	model   string
 	client  *http.Client
+	log     *slog.Logger
 }
 
 // NewOpenAIProvider creates a new OpenAI-compatible provider
@@ -44,6 +48,7 @@ func NewOpenAIProvider(cfg ProviderConfig) (Provider, error) {
 		client: &http.Client{
 			Timeout: 120 * time.Second,
 		},
+		log: logger.L().With("component", "llm", "model", cfg.Model),
 	}, nil
 }
 
@@ -80,6 +85,9 @@ type openAIResponse struct {
 
 // Complete sends a completion request
 func (p *OpenAIProvider) Complete(ctx context.Context, messages []Message) (*Response, error) {
+	startTime := time.Now()
+	p.log.Debug("sending completion request", "message_count", len(messages))
+
 	reqBody := openAIRequest{
 		Model:    p.model,
 		Messages: messages,
@@ -100,6 +108,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, messages []Message) (*Res
 
 	resp, err := p.client.Do(req)
 	if err != nil {
+		p.log.Error("request failed", "error", err)
 		return nil, fmt.Errorf("sending request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -115,12 +124,21 @@ func (p *OpenAIProvider) Complete(ctx context.Context, messages []Message) (*Res
 	}
 
 	if result.Error != nil {
+		p.log.Error("API error", "message", result.Error.Message, "type", result.Error.Type)
 		return nil, fmt.Errorf("API error: %s", result.Error.Message)
 	}
 
 	if len(result.Choices) == 0 {
 		return nil, fmt.Errorf("no choices in response")
 	}
+
+	duration := time.Since(startTime)
+	p.log.Info("completion received",
+		"tokens_used", result.Usage.TotalTokens,
+		"prompt_tokens", result.Usage.PromptTokens,
+		"completion_tokens", result.Usage.CompletionTokens,
+		"duration_ms", duration.Milliseconds(),
+	)
 
 	return &Response{
 		Content:      result.Choices[0].Message.Content,
@@ -131,6 +149,9 @@ func (p *OpenAIProvider) Complete(ctx context.Context, messages []Message) (*Res
 
 // Stream sends a streaming completion request
 func (p *OpenAIProvider) Stream(ctx context.Context, messages []Message, onChunk func(string)) error {
+	startTime := time.Now()
+	p.log.Debug("starting stream request", "message_count", len(messages))
+
 	reqBody := openAIRequest{
 		Model:    p.model,
 		Messages: messages,
@@ -153,10 +174,12 @@ func (p *OpenAIProvider) Stream(ctx context.Context, messages []Message, onChunk
 
 	resp, err := p.client.Do(req)
 	if err != nil {
+		p.log.Error("stream request failed", "error", err)
 		return fmt.Errorf("sending request: %w", err)
 	}
 	defer resp.Body.Close()
 
+	chunkCount := 0
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -177,8 +200,15 @@ func (p *OpenAIProvider) Stream(ctx context.Context, messages []Message, onChunk
 
 		if len(result.Choices) > 0 && result.Choices[0].Delta.Content != "" {
 			onChunk(result.Choices[0].Delta.Content)
+			chunkCount++
 		}
 	}
+
+	duration := time.Since(startTime)
+	p.log.Info("stream completed",
+		"chunks", chunkCount,
+		"duration_ms", duration.Milliseconds(),
+	)
 
 	return scanner.Err()
 }

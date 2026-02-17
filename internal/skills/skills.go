@@ -2,10 +2,12 @@ package skills
 
 import (
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
 
+	"github.com/igm/igent/internal/logger"
 	"github.com/igm/igent/internal/storage"
 )
 
@@ -14,13 +16,17 @@ type Registry struct {
 	store  *storage.JSONStore
 	skills map[string]*storage.Skill
 	mu     sync.RWMutex
+	log    *slog.Logger
 }
 
 // NewRegistry creates a new skill registry
 func NewRegistry(store *storage.JSONStore) (*Registry, error) {
+	log := logger.L().With("component", "skills")
+
 	r := &Registry{
 		store:  store,
 		skills: make(map[string]*storage.Skill),
+		log:    log,
 	}
 
 	// Load existing skills
@@ -32,7 +38,12 @@ func NewRegistry(store *storage.JSONStore) (*Registry, error) {
 	for _, skill := range skills {
 		if skill.Enabled {
 			r.skills[skill.ID] = skill
+			log.Debug("skill loaded", "id", skill.ID, "name", skill.Name)
 		}
+	}
+
+	if len(r.skills) > 0 {
+		log.Info("skills loaded from storage", "count", len(r.skills))
 	}
 
 	return r, nil
@@ -68,6 +79,7 @@ func (r *Registry) Register(skill *storage.Skill) error {
 	}
 
 	r.skills[skill.ID] = skill
+	r.log.Info("skill registered", "id", skill.ID, "name", skill.Name, "enabled", skill.Enabled)
 	return nil
 }
 
@@ -80,7 +92,12 @@ func (r *Registry) Unregister(id string) error {
 		return err
 	}
 
+	skillName := ""
+	if skill, ok := r.skills[id]; ok {
+		skillName = skill.Name
+	}
 	delete(r.skills, id)
+	r.log.Info("skill unregistered", "id", id, "name", skillName)
 	return nil
 }
 
@@ -100,6 +117,7 @@ func (r *Registry) Match(input string) []*storage.Skill {
 		// Check name match
 		if strings.Contains(inputLower, strings.ToLower(skill.Name)) {
 			matches = append(matches, skill)
+			r.log.Debug("skill matched by name", "id", skill.ID, "name", skill.Name)
 			continue
 		}
 
@@ -108,10 +126,15 @@ func (r *Registry) Match(input string) []*storage.Skill {
 			if pattern, ok := skill.Parameters["trigger_"+key]; ok {
 				if matched, _ := regexp.MatchString(pattern, input); matched {
 					matches = append(matches, skill)
+					r.log.Debug("skill matched by pattern", "id", skill.ID, "pattern_key", key)
 					break
 				}
 			}
 		}
+	}
+
+	if len(matches) > 0 {
+		r.log.Debug("skills matched", "count", len(matches))
 	}
 
 	return matches
@@ -125,9 +148,13 @@ func (r *Registry) EnhancePrompt(input string, basePrompt string) string {
 	}
 
 	var enhancements []string
+	var skillNames []string
 	for _, skill := range matches {
 		enhancements = append(enhancements, skill.Prompt)
+		skillNames = append(skillNames, skill.Name)
 	}
+
+	r.log.Info("prompt enhanced with skills", "skills", strings.Join(skillNames, ", "))
 
 	if basePrompt != "" {
 		return basePrompt + "\n\nAdditional context from skills:\n" + strings.Join(enhancements, "\n")
@@ -167,9 +194,11 @@ func DefaultSkills() []*storage.Skill {
 func (r *Registry) InitializeDefaults() error {
 	existing := r.List()
 	if len(existing) > 0 {
+		r.log.Debug("skills already exist, skipping defaults initialization")
 		return nil
 	}
 
+	r.log.Info("initializing default skills")
 	for _, skill := range DefaultSkills() {
 		if err := r.Register(skill); err != nil {
 			return fmt.Errorf("registering skill %s: %w", skill.ID, err)

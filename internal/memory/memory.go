@@ -3,11 +3,13 @@ package memory
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/igm/igent/internal/llm"
+	"github.com/igm/igent/internal/logger"
 	"github.com/igm/igent/internal/storage"
 )
 
@@ -18,6 +20,7 @@ type Manager struct {
 	maxMessages   int
 	maxTokens     int
 	summarizeWhen int
+	log           *slog.Logger
 }
 
 // NewManager creates a new memory manager
@@ -28,16 +31,19 @@ func NewManager(store *storage.JSONStore, provider llm.Provider, maxMessages, ma
 		maxMessages:   maxMessages,
 		maxTokens:     maxTokens,
 		summarizeWhen: summarizeWhen,
+		log:           logger.L().With("component", "memory"),
 	}
 }
 
 // BuildContext builds the optimal context for a new query
 func (m *Manager) BuildContext(conv *storage.Conversation, userMessage string) ([]llm.Message, error) {
+	m.log.Debug("building context", "conversation_id", conv.ID)
 	var context []llm.Message
 
 	// 1. Start with relevant memories
 	memories, err := m.getRelevantMemories(userMessage)
 	if err == nil && len(memories) > 0 {
+		m.log.Debug("relevant memories found", "count", len(memories))
 		memoryContext := m.formatMemories(memories)
 		if memoryContext != "" {
 			context = append(context, llm.Message{
@@ -49,6 +55,7 @@ func (m *Manager) BuildContext(conv *storage.Conversation, userMessage string) (
 
 	// 2. Add conversation summary if available
 	if conv.Summary != "" {
+		m.log.Debug("using conversation summary")
 		context = append(context, llm.Message{
 			Role:    "system",
 			Content: "Previous conversation summary: " + conv.Summary,
@@ -58,9 +65,14 @@ func (m *Manager) BuildContext(conv *storage.Conversation, userMessage string) (
 	// 3. Add recent messages (sliding window)
 	recentMessages := m.getRecentMessages(conv.Messages, userMessage)
 	context = append(context, recentMessages...)
+	m.log.Debug("recent messages added", "count", len(recentMessages))
 
 	// 4. Check if we need summarization
 	if len(conv.Messages) >= m.summarizeWhen {
+		m.log.Info("summarization threshold reached, triggering async summarization",
+			"message_count", len(conv.Messages),
+			"threshold", m.summarizeWhen,
+		)
 		go m.summarizeConversation(conv) // Async summarization
 	}
 
@@ -160,6 +172,11 @@ func (m *Manager) summarizeConversation(conv *storage.Conversation) {
 		return
 	}
 
+	m.log.Info("starting conversation summarization",
+		"conversation_id", conv.ID,
+		"message_count", len(conv.Messages),
+	)
+
 	// Keep last 10 messages, summarize the rest
 	keepCount := 10
 	if len(conv.Messages) <= keepCount {
@@ -167,6 +184,7 @@ func (m *Manager) summarizeConversation(conv *storage.Conversation) {
 	}
 
 	toSummarize := conv.Messages[:len(conv.Messages)-keepCount]
+	m.log.Debug("messages to summarize", "count", len(toSummarize))
 
 	summarizePrompt := []llm.Message{
 		{
@@ -182,8 +200,10 @@ func (m *Manager) summarizeConversation(conv *storage.Conversation) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	startTime := time.Now()
 	resp, err := m.provider.Complete(ctx, summarizePrompt)
 	if err != nil {
+		m.log.Error("summarization failed", "error", err)
 		return
 	}
 
@@ -191,6 +211,12 @@ func (m *Manager) summarizeConversation(conv *storage.Conversation) {
 	conv.Summary = resp.Content
 	conv.Messages = conv.Messages[len(conv.Messages)-keepCount:]
 	m.store.SaveConversation(conv)
+
+	m.log.Info("summarization completed",
+		"conversation_id", conv.ID,
+		"summary_length", len(resp.Content),
+		"duration_ms", time.Since(startTime).Milliseconds(),
+	)
 
 	// Store important facts as memories
 	m.extractMemories(conv, toSummarize)
@@ -207,6 +233,8 @@ func formatMessagesForSummary(messages []llm.Message) string {
 
 // extractMemories extracts important information from summarized messages
 func (m *Manager) extractMemories(conv *storage.Conversation, messages []llm.Message) {
+	m.log.Debug("extracting memories from summarized messages")
+
 	extractPrompt := []llm.Message{
 		{
 			Role: "system",
@@ -228,11 +256,13 @@ context: Working on a Go project`,
 
 	resp, err := m.provider.Complete(ctx, extractPrompt)
 	if err != nil {
+		m.log.Error("memory extraction failed", "error", err)
 		return
 	}
 
 	// Parse and store memories
 	lines := strings.Split(resp.Content, "\n")
+	extractedCount := 0
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -259,7 +289,15 @@ context: Working on a Go project`,
 			Relevance: 0.7,
 		}
 
-		m.store.SaveMemory(memory)
+		if err := m.store.SaveMemory(memory); err != nil {
+			m.log.Error("failed to save memory", "error", err, "type", memType)
+			continue
+		}
+		extractedCount++
+	}
+
+	if extractedCount > 0 {
+		m.log.Info("memories extracted", "count", extractedCount)
 	}
 }
 
@@ -272,7 +310,11 @@ func (m *Manager) AddMemory(content, memType string) error {
 		CreatedAt: time.Now(),
 		Relevance: 1.0,
 	}
-	return m.store.SaveMemory(memory)
+	if err := m.store.SaveMemory(memory); err != nil {
+		return err
+	}
+	m.log.Info("memory added", "type", memType, "content_length", len(content))
+	return nil
 }
 
 // generateID generates a simple unique ID

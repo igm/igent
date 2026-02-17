@@ -6,70 +6,127 @@ A simple, extensible AI agent implemented in Go that maintains conversation hist
 
 ```
 igent/
-├── cmd/igent/           # CLI entry point
+├── cmd/igent/main.go        # CLI entry point (Cobra)
 ├── internal/
-│   ├── agent/           # Core agent logic
-│   ├── config/          # Configuration management
-│   ├── llm/             # LLM provider abstraction
-│   ├── memory/          # Context & memory optimization
-│   ├── skills/          # Skill system
-│   └── storage/         # Persistence layer
-└── CLAUDE.md           # This file
+│   ├── agent/agent.go       # Core agent logic, Chat, Interactive REPL
+│   ├── config/config.go     # Viper-based configuration
+│   ├── llm/
+│   │   ├── provider.go      # Provider interface
+│   │   ├── openai.go        # OpenAI-compatible HTTP client
+│   │   └── zhipu.go         # Z.AI/GLM provider wrapper
+│   ├── memory/memory.go     # Context optimization, summarization
+│   ├── skills/skills.go     # Skill registry with pattern matching
+│   └── storage/
+│       ├── storage.go       # Storage interface
+│       └── json_store.go    # JSON file persistence
+├── Makefile
+├── go.mod
+├── README.md
+└── CLAUDE.md
 ```
 
 ## Key Components
 
-### 1. LLM Provider (`internal/llm/`)
+### 1. Agent (`internal/agent/`)
+
+The core orchestrator that:
+- Loads/saves conversations
+- Builds context with memory optimization
+- Constructs system prompts with current date/time
+- Manages streaming and non-streaming responses
+- Provides interactive REPL with slash commands
+
+**System Prompt Construction:**
+```go
+func (a *Agent) buildSystemPrompt() string {
+    now := time.Now()
+    dateTime := now.Format("Monday, January 2, 2006 at 3:04 PM MST")
+    prompt := a.config.Agent.SystemPrompt
+    prompt += fmt.Sprintf("\n\nCurrent date and time: %s", dateTime)
+    return prompt
+}
+```
+
+### 2. LLM Provider (`internal/llm/`)
+
 - **Interface**: `Provider` with `Complete`, `Stream`, `CountTokens` methods
 - **Implementations**: OpenAI-compatible (works with OpenAI, Z.AI, GLM, etc.)
 - **Registry pattern**: Add new providers via `Register(name, factory)`
 
-### 2. Storage (`internal/storage/`)
-- **JSON-based persistence** for portability
+**Adding a new provider:**
+```go
+func init() {
+    llm.Register("myprovider", func(cfg llm.ProviderConfig) (llm.Provider, error) {
+        return &MyProvider{...}, nil
+    })
+}
+```
+
+### 3. Storage (`internal/storage/`)
+
+- **JSON-based persistence** in `~/.igent/`
+- **Subdirectories**: `messages/`, `memory/`, `skills/`
 - **Three data types**:
   - `Conversation`: Message history with summaries
   - `MemoryItem`: Persistent facts/preferences with relevance scores
   - `Skill`: Extensible agent capabilities
 
-### 3. Memory Manager (`internal/memory/`)
-- **Context window optimization**:
-  - Sliding window for recent messages
-  - Automatic summarization when threshold reached
-  - Memory extraction from old conversations
-- **Relevance scoring** for memory retrieval
+### 4. Memory Manager (`internal/memory/`)
 
-### 4. Skills (`internal/skills/`)
+- **Context window optimization**:
+  - Sliding window for recent messages (respects `max_messages`)
+  - Token budget awareness (respects `max_tokens`)
+  - Automatic summarization when threshold (`summarize_when`) reached
+  - Memory extraction from summarized conversations
+- **Relevance scoring**: Keyword matching + stored relevance for memory retrieval
+
+### 5. Skills (`internal/skills/`)
+
 - **Dynamic skill loading** from storage
 - **Pattern matching** for skill activation
-- **Prompt enhancement** with skill context
+- **Prompt enhancement**: Skills inject context into system prompt
+- **Default skills**: `code`, `explain`, `summarize`
 
 ## Configuration
 
-Location: `~/.igent/config.yaml` (or `IGENT_CONFIG`)
+Location: `~/.igent/config.yaml`
+
+**Important**: Config keys must use `snake_case` (e.g., `api_key`, `base_url`).
 
 ```yaml
 provider:
-  type: openai          # openai, zhipu, glm
-  base_url: https://api.openai.com/v1
-  api_key: ${IGENT_API_KEY}
-  model: gpt-4o-mini
+  type: glm                        # openai, zhipu, glm
+  base_url: https://api.z.ai/api/coding/paas/v4
+  api_key: your-api-key-here
+  model: glm-5
 
 storage:
   work_dir: ~/.igent
 
 context:
-  max_messages: 50      # Max messages in context
-  max_tokens: 4000      # Token budget
-  summarize_when: 30    # Trigger summarization
+  max_messages: 50                 # Max messages in context window
+  max_tokens: 4000                 # Token budget for context
+  summarize_when: 30               # Trigger summarization at this count
 
 agent:
   name: igent
-  system_prompt: "You are a helpful AI assistant."
+  system_prompt: "You are a helpful AI assistant. Be concise and accurate."
 ```
+
+### Environment Variables
+
+API key is loaded in this order:
+1. `IGENT_PROVIDER_API_KEY` - Explicit provider key
+2. `IGENT_API_KEY` - Generic igent key
+3. `OPENAI_API_KEY` - Fallback for OpenAI compatibility
+4. Config file `provider.api_key`
+
+Other:
+- `IGENT_CONFIG`: Custom config file path
 
 ## Data Structures
 
-### Conversation
+### Conversation (`~/.igent/messages/<id>.json`)
 ```json
 {
   "id": "default",
@@ -83,18 +140,18 @@ agent:
 }
 ```
 
-### Memory Item
+### Memory Item (`~/.igent/memory/<id>.json`)
 ```json
 {
   "id": "abc123",
   "content": "User prefers Go programming",
-  "type": "preference",  // fact, preference, context
+  "type": "preference",
   "created_at": "2024-01-15T10:00:00Z",
   "relevance": 0.9
 }
 ```
 
-### Skill
+### Skill (`~/.igent/skills/<id>.json`)
 ```json
 {
   "id": "code",
@@ -105,11 +162,12 @@ agent:
 }
 ```
 
-## Usage Patterns
+## CLI Usage
 
-### CLI Commands
+### Commands
+
 ```bash
-# Interactive mode
+# Interactive mode (REPL)
 igent
 
 # Single message
@@ -118,55 +176,54 @@ igent "What is the capital of France?"
 # Specify conversation
 igent -C work-chat "Continue our discussion"
 
-# Stream response (default)
-igent -s "Tell me a story"
-
-# Non-streaming
-igent --stream=false "Quick answer"
+# Flags
+igent -c /path/to/config.yaml    # Custom config
+igent -C my-conversation          # Conversation ID
+igent -s                          # Stream response (default)
+igent --stream=false              # Non-streaming
+igent -v                          # Show version
 ```
 
 ### Management Commands
+
 ```bash
-# Configuration
-igent config init       # Initialize config
-igent config show       # Show current config
+igent config init                 # Initialize config interactively
+igent config show                 # Show current config
 
-# Conversations
-igent list              # List all conversations
-igent -C new-chat       # Start new conversation
+igent list                        # List all conversations
 
-# Memory
-igent memory list                    # Show memories
-igent memory add preference "..."    # Add memory
-igent memory delete <id>             # Remove memory
+igent memory list                 # Show all memories
+igent memory add preference "..." # Add memory
+igent memory delete <id>          # Remove memory
 
-# Skills
-igent skill list        # List skills
+igent skill list                  # List skills
 ```
 
-### Interactive Commands
+### Interactive REPL Commands
+
 ```
-> /help                 # Show commands
-> /new work             # New conversation
+> /help                 # Show all commands
+> /new [name]           # Start new conversation
 > /list                 # List conversations
-> /switch work          # Switch conversation
-> /memory               # Show memories
-> /memory add fact "..." # Add memory
+> /switch <id>          # Switch to conversation
+> /delete <id>          # Delete conversation
+> /memory               # List memories
+> /memory add <type> <content>  # Add memory (type: fact/preference/context)
 > /skills               # List skills
 > /clear                # Clear screen
 > /exit                 # Exit
 ```
 
-## Adding a New LLM Provider
+## Build Commands
 
-1. Implement `llm.Provider` interface
-2. Register in `init()`:
-```go
-func init() {
-    llm.Register("myprovider", func(cfg llm.ProviderConfig) (llm.Provider, error) {
-        return &MyProvider{...}, nil
-    })
-}
+```bash
+make build          # Build binary
+make install        # Install to GOBIN
+make test           # Run tests
+make clean          # Clean build artifacts
+make build-all      # Cross-compile for darwin/linux/windows
+make fmt            # Format code
+make lint           # Run linter
 ```
 
 ## Context Optimization Strategy
@@ -174,26 +231,32 @@ func init() {
 1. **Token Budget**: Reserve tokens for system prompt + response
 2. **Sliding Window**: Keep most recent messages within budget
 3. **Summarization**: When message count > `summarize_when`:
-   - Keep last N messages
+   - Keep last 10 messages
    - Summarize older messages via LLM
-   - Extract important facts as memories
+   - Extract important facts as memories (async)
 4. **Memory Retrieval**: Keyword matching with relevance boosting
 
-## Environment Variables
+## Supported Providers
 
-- `IGENT_API_KEY` or `OPENAI_API_KEY`: API key
-- `IGENT_CONFIG`: Custom config file path
+| Provider | Type | Default Base URL |
+|----------|------|------------------|
+| OpenAI | `openai` | `https://api.openai.com/v1` |
+| Z.AI | `zhipu` | `https://open.bigmodel.cn/api/paas/v4` |
+| GLM | `glm` | Same as Z.AI |
+| Custom | `openai` | Your URL |
 
-## Testing
+## Development
 
 ```bash
+# Run tests
 go test ./...
+
+# Run specific package tests
 go test -v ./internal/memory/...
-```
 
-## Build & Install
-
-```bash
+# Build
 go build -o igent ./cmd/igent
+
+# Install
 go install ./cmd/igent
 ```

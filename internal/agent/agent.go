@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/igm/igent/internal/config"
 	"github.com/igm/igent/internal/llm"
+	"github.com/igm/igent/internal/logger"
 	"github.com/igm/igent/internal/memory"
 	"github.com/igm/igent/internal/skills"
 	"github.com/igm/igent/internal/storage"
@@ -25,20 +27,34 @@ type Agent struct {
 	memory         *memory.Manager
 	skills         *skills.Registry
 	conversationID string
+	log            *slog.Logger
 }
 
 // New creates a new agent instance
 func New(cfg *config.Config) (*Agent, error) {
+	log := logger.L().With("component", "agent")
+
+	// Initialize logger with config
+	logger.Init(logger.Config{
+		Level:  logger.Level(cfg.Logging.Level),
+		Format: logger.Format(cfg.Logging.Format),
+	}, nil)
+	log = logger.L().With("component", "agent")
+
+	log.Debug("initializing agent", "name", cfg.Agent.Name)
+
 	// Ensure working directory exists
 	if err := cfg.EnsureWorkDir(); err != nil {
 		return nil, fmt.Errorf("creating work directory: %w", err)
 	}
+	log.Debug("work directory ensured", "path", cfg.Storage.WorkDir)
 
 	// Initialize storage
 	store, err := storage.NewJSONStore(cfg.Storage.WorkDir)
 	if err != nil {
 		return nil, fmt.Errorf("initializing storage: %w", err)
 	}
+	log.Debug("storage initialized")
 
 	// Initialize LLM provider
 	provider, err := llm.New(llm.ProviderConfig{
@@ -50,6 +66,7 @@ func New(cfg *config.Config) (*Agent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initializing provider: %w", err)
 	}
+	log.Info("LLM provider initialized", "type", cfg.Provider.Type, "model", cfg.Provider.Model)
 
 	// Initialize memory manager
 	memMgr := memory.NewManager(store, provider,
@@ -57,17 +74,25 @@ func New(cfg *config.Config) (*Agent, error) {
 		cfg.Context.MaxTokens,
 		cfg.Context.SummarizeWhen,
 	)
+	log.Debug("memory manager initialized",
+		"max_messages", cfg.Context.MaxMessages,
+		"max_tokens", cfg.Context.MaxTokens,
+		"summarize_when", cfg.Context.SummarizeWhen,
+	)
 
 	// Initialize skill registry
 	skillRegistry, err := skills.NewRegistry(store)
 	if err != nil {
 		return nil, fmt.Errorf("initializing skills: %w", err)
 	}
+	log.Debug("skill registry initialized")
 
 	// Initialize default skills
 	if err := skillRegistry.InitializeDefaults(); err != nil {
 		return nil, fmt.Errorf("loading default skills: %w", err)
 	}
+
+	log.Info("agent ready", "name", cfg.Agent.Name)
 
 	return &Agent{
 		config:   cfg,
@@ -75,6 +100,7 @@ func New(cfg *config.Config) (*Agent, error) {
 		store:    store,
 		memory:   memMgr,
 		skills:   skillRegistry,
+		log:      log,
 	}, nil
 }
 
@@ -89,16 +115,26 @@ func (a *Agent) SetConversation(id string) error {
 	// Check if conversation exists, create if not
 	_, err := a.store.LoadConversation(id)
 	if err == storage.ErrNotFound {
+		a.log.Info("creating new conversation", "id", id)
 		conv := &storage.Conversation{
 			ID:        id,
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 			Messages:  []llm.Message{},
 		}
-		return a.store.SaveConversation(conv)
+		if err := a.store.SaveConversation(conv); err != nil {
+			return err
+		}
+		a.log.Debug("conversation created", "id", id)
+		return nil
 	}
 
-	return err
+	if err != nil {
+		return err
+	}
+
+	a.log.Debug("conversation loaded", "id", id)
+	return nil
 }
 
 // buildSystemPrompt constructs the system prompt with dynamic information
@@ -108,6 +144,8 @@ func (a *Agent) buildSystemPrompt() string {
 
 	prompt := a.config.Agent.SystemPrompt
 	prompt += fmt.Sprintf("\n\nCurrent date and time: %s", dateTime)
+
+	a.log.Debug("system prompt built", "datetime", dateTime)
 
 	return prompt
 }
@@ -119,6 +157,8 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 
 // ChatStream sends a message and streams the response
 func (a *Agent) ChatStream(ctx context.Context, userInput string, onChunk func(string)) (string, error) {
+	a.log.Debug("chat request started", "input_length", len(userInput))
+
 	// Load current conversation
 	conv, err := a.store.LoadConversation(a.conversationID)
 	if err != nil {
@@ -130,19 +170,23 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string, onChunk func(s
 	if err != nil {
 		return "", fmt.Errorf("building context: %w", err)
 	}
+	a.log.Debug("context built", "message_count", len(messages))
 
 	// Build system prompt with current date/time
 	systemPrompt := a.buildSystemPrompt()
 	systemPrompt = a.skills.EnhancePrompt(userInput, systemPrompt)
+	a.log.Debug("prompt enhanced with skills")
 
 	fullMessages := []llm.Message{{Role: "system", Content: systemPrompt}}
 	fullMessages = append(fullMessages, messages...)
 
 	// Get response from LLM
 	var response string
+	startTime := time.Now()
 
 	if onChunk != nil {
 		// Streaming mode
+		a.log.Debug("starting streaming response")
 		var fullResponse strings.Builder
 		err = a.provider.Stream(ctx, fullMessages, func(chunk string) {
 			fullResponse.WriteString(chunk)
@@ -151,6 +195,7 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string, onChunk func(s
 		response = fullResponse.String()
 	} else {
 		// Non-streaming mode
+		a.log.Debug("starting non-streaming response")
 		resp, err := a.provider.Complete(ctx, fullMessages)
 		if err != nil {
 			return "", fmt.Errorf("LLM completion: %w", err)
@@ -162,6 +207,12 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string, onChunk func(s
 		return "", fmt.Errorf("LLM error: %w", err)
 	}
 
+	duration := time.Since(startTime)
+	a.log.Info("chat completed",
+		"response_length", len(response),
+		"duration_ms", duration.Milliseconds(),
+	)
+
 	// Save messages to conversation
 	conv.Messages = append(conv.Messages,
 		llm.Message{Role: "user", Content: userInput},
@@ -171,6 +222,7 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string, onChunk func(s
 	if err := a.store.SaveConversation(conv); err != nil {
 		return "", fmt.Errorf("saving conversation: %w", err)
 	}
+	a.log.Debug("conversation saved", "total_messages", len(conv.Messages))
 
 	return response, nil
 }
@@ -217,6 +269,7 @@ func (a *Agent) UnregisterSkill(id string) error {
 
 // Interactive starts an interactive REPL session
 func (a *Agent) Interactive(ctx context.Context) error {
+	a.log.Info("starting interactive session", "conversation", a.conversationID)
 	fmt.Printf("%s ready. Type your message (Ctrl+C to exit).\n", a.config.Agent.Name)
 
 	sigChan := make(chan os.Signal, 1)

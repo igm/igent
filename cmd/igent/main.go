@@ -9,6 +9,7 @@ import (
 
 	"github.com/igm/igent/internal/agent"
 	"github.com/igm/igent/internal/config"
+	"github.com/igm/igent/internal/logger"
 )
 
 var (
@@ -16,6 +17,7 @@ var (
 	convID      string
 	streaming   bool
 	showVersion bool
+	verbose     bool
 
 	version = "dev"
 )
@@ -42,6 +44,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&convID, "conversation", "C", "default", "conversation ID")
 	rootCmd.PersistentFlags().BoolVarP(&streaming, "stream", "s", true, "stream response")
 	rootCmd.PersistentFlags().BoolVarP(&showVersion, "version", "v", false, "show version")
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "V", false, "enable verbose (debug) logging")
 
 	// Subcommands
 	rootCmd.AddCommand(configCmd)
@@ -61,6 +64,23 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+
+	// Initialize logging (verbose flag overrides config)
+	logLevel := logger.Level(cfg.Logging.Level)
+	if verbose {
+		logLevel = logger.LevelDebug
+	}
+	logger.Init(logger.Config{
+		Level:  logLevel,
+		Format: logger.Format(cfg.Logging.Format),
+	}, nil)
+	log := logger.L().With("component", "cli")
+
+	log.Debug("configuration loaded",
+		"provider", cfg.Provider.Type,
+		"model", cfg.Provider.Model,
+		"work_dir", cfg.Storage.WorkDir,
+	)
 
 	// Create agent
 	ag, err := agent.New(cfg)
@@ -92,6 +112,8 @@ func runAgent(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
+
+	log.Debug("single message mode", "streaming", streaming)
 
 	if streaming {
 		_, err = ag.ChatStream(ctx, prompt, func(chunk string) {
@@ -180,6 +202,8 @@ var configShowCmd = &cobra.Command{
 		fmt.Printf("Work Dir: %s\n", cfg.Storage.WorkDir)
 		fmt.Printf("Max Messages: %d\n", cfg.Context.MaxMessages)
 		fmt.Printf("Max Tokens: %d\n", cfg.Context.MaxTokens)
+		fmt.Printf("Log Level: %s\n", cfg.Logging.Level)
+		fmt.Printf("Log Format: %s\n", cfg.Logging.Format)
 		return nil
 	},
 }
