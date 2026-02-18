@@ -21,6 +21,9 @@ import (
 	"github.com/igm/igent/internal/tools"
 )
 
+// ErrToolDenied is returned when user denies tool execution
+var ErrToolDenied = fmt.Errorf("tool execution denied by user")
+
 // ToolConfirmationFunc is called before executing a tool to get user confirmation.
 // Returns true to allow execution, false to deny.
 type ToolConfirmationFunc func(call *tools.ToolCall) bool
@@ -305,14 +308,8 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string, onChunk func(s
 			// Request confirmation before execution
 			if a.onToolConfirm != nil {
 				if !a.onToolConfirm(call) {
-					// User denied execution
-					fullMessages = append(fullMessages, llm.Message{
-						Role:       "tool",
-						ToolCallID: tc.ID,
-						Name:       tc.Function.Name,
-						Content:    "Tool execution denied by user",
-					})
-					continue
+					// User denied execution - stop and return to input
+					return "", ErrToolDenied
 				}
 			}
 
@@ -492,6 +489,11 @@ func (a *Agent) Interactive(ctx context.Context) error {
 			fmt.Print(chunk)
 		})
 		if err != nil {
+			if err == ErrToolDenied {
+				// Tool denied - just return to prompt
+				fmt.Print("\n\n")
+				continue
+			}
 			fmt.Printf("\nError: %v\n", err)
 			continue
 		}

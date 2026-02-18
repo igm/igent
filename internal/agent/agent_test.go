@@ -1205,12 +1205,8 @@ func TestToolConfirmation_Denied(t *testing.T) {
 		t.Fatalf("failed to set conversation: %v", err)
 	}
 
-	resp, err := ag.Chat(context.Background(), "Test denied")
-	if err != nil {
-		t.Fatalf("Chat() error = %v", err)
-	}
-
-	if resp != "Continued after denied tool" {
-		t.Errorf("unexpected response: %s", resp)
+	_, err = ag.Chat(context.Background(), "Test denied")
+	if err != ErrToolDenied {
+		t.Fatalf("Chat() error = %v, want ErrToolDenied", err)
 	}
 }
