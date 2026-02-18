@@ -11,6 +11,7 @@ import (
 	"github.com/igm/igent/internal/config"
 	"github.com/igm/igent/internal/llm"
 	"github.com/igm/igent/internal/storage"
+	"github.com/igm/igent/internal/tools"
 )
 
 // mockProvider for testing
@@ -1012,6 +1013,204 @@ func TestChat_ToolCallWithNilFunction(t *testing.T) {
 	}
 
 	if resp != "Done!" {
+		t.Errorf("unexpected response: %s", resp)
+	}
+}
+
+func TestFormatToolCall(t *testing.T) {
+	tests := []struct {
+		name     string
+		call     *tools.ToolCall
+		contains []string
+	}{
+		{
+			name: "shell command",
+			call: &tools.ToolCall{
+				ID:   "call-1",
+				Name: "shell",
+				Args: map[string]interface{}{
+					"command": "ls -la",
+					"timeout": float64(30),
+				},
+			},
+			contains: []string{"Tool:", "shell", "command:", "ls -la", "Executing:", "timeout"},
+		},
+		{
+			name: "echo tool",
+			call: &tools.ToolCall{
+				ID:   "call-2",
+				Name: "echo",
+				Args: map[string]interface{}{
+					"text": "hello world",
+				},
+			},
+			contains: []string{"Tool:", "echo", "text:", "hello world"},
+		},
+		{
+			name: "tool with no args",
+			call: &tools.ToolCall{
+				ID:   "call-3",
+				Name: "pwd",
+				Args: map[string]interface{}{},
+			},
+			contains: []string{"Tool:", "pwd"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output := FormatToolCall(tt.call)
+			for _, expected := range tt.contains {
+				if !strings.Contains(output, expected) {
+					t.Errorf("FormatToolCall() missing expected string %q in output:\n%s", expected, output)
+				}
+			}
+		})
+	}
+}
+
+func TestSetToolConfirmation(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "igent-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Provider: config.ProviderConfig{
+			Type:    "openai",
+			APIKey:  "test-key",
+			BaseURL: "https://api.example.com/v1",
+			Model:   "test-model",
+		},
+		Storage: config.StorageConfig{
+			WorkDir: tmpDir,
+		},
+		Context: config.ContextConfig{
+			MaxMessages:   10,
+			MaxTokens:     1000,
+			SummarizeWhen: 5,
+		},
+		Agent: config.AgentConfig{
+			Name:         "test-agent",
+			SystemPrompt: "Test prompt",
+		},
+	}
+
+	ag, err := New(cfg)
+	if err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	// Set confirmation callback
+	confirmationCalled := false
+	ag.SetToolConfirmation(func(call *tools.ToolCall) bool {
+		confirmationCalled = true
+		return true
+	})
+
+	if ag.onToolConfirm == nil {
+		t.Error("onToolConfirm should not be nil after SetToolConfirmation")
+	}
+
+	// Trigger a tool call
+	ag.provider = &mockProvider{
+		toolCalls: []llm.ToolCall{
+			{
+				ID:   "call-1",
+				Type: "function",
+				Function: &llm.ToolCallFunction{
+					Name:      "echo",
+					Arguments: `{"text": "test"}`,
+				},
+			},
+		},
+		response: "Done",
+	}
+
+	if err := ag.SetConversation("test-confirm"); err != nil {
+		t.Fatalf("failed to set conversation: %v", err)
+	}
+
+	_, err = ag.Chat(context.Background(), "Test")
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+
+	if !confirmationCalled {
+		t.Error("confirmation callback was not called")
+	}
+}
+
+func TestToolConfirmation_Denied(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "igent-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Provider: config.ProviderConfig{
+			Type:    "openai",
+			APIKey:  "test-key",
+			BaseURL: "https://api.example.com/v1",
+			Model:   "test-model",
+		},
+		Storage: config.StorageConfig{
+			WorkDir: tmpDir,
+		},
+		Context: config.ContextConfig{
+			MaxMessages:   10,
+			MaxTokens:     1000,
+			SummarizeWhen: 5,
+		},
+		Agent: config.AgentConfig{
+			Name:         "test-agent",
+			SystemPrompt: "Test prompt",
+		},
+	}
+
+	ag, err := New(cfg)
+	if err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	// Set confirmation that denies all
+	ag.SetToolConfirmation(func(call *tools.ToolCall) bool {
+		return false // deny all
+	})
+
+	// Provider that returns tool calls then a response
+	ag.provider = &mockProviderWithCustomBehavior{
+		responses: []*llm.Response{
+			{
+				ToolCalls: []llm.ToolCall{
+					{
+						ID:   "call-1",
+						Type: "function",
+						Function: &llm.ToolCallFunction{
+							Name:      "echo",
+							Arguments: `{"text": "test"}`,
+						},
+					},
+				},
+			},
+			{
+				Content: "Continued after denied tool",
+			},
+		},
+	}
+
+	if err := ag.SetConversation("test-denied"); err != nil {
+		t.Fatalf("failed to set conversation: %v", err)
+	}
+
+	resp, err := ag.Chat(context.Background(), "Test denied")
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+
+	if resp != "Continued after denied tool" {
 		t.Errorf("unexpected response: %s", resp)
 	}
 }

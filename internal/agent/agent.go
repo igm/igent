@@ -20,6 +20,10 @@ import (
 	"github.com/igm/igent/internal/tools"
 )
 
+// ToolConfirmationFunc is called before executing a tool to get user confirmation.
+// Returns true to allow execution, false to deny.
+type ToolConfirmationFunc func(call *tools.ToolCall) bool
+
 // Agent represents the AI agent
 type Agent struct {
 	config         *config.Config
@@ -30,6 +34,9 @@ type Agent struct {
 	tools          *tools.Registry
 	conversationID string
 	log            *slog.Logger
+
+	// onToolConfirm is called before each tool execution for user confirmation
+	onToolConfirm ToolConfirmationFunc
 }
 
 // New creates a new agent instance
@@ -109,6 +116,51 @@ func New(cfg *config.Config) (*Agent, error) {
 		tools:    toolRegistry,
 		log:      log,
 	}, nil
+}
+
+// SetToolConfirmation sets the callback function for tool confirmation
+func (a *Agent) SetToolConfirmation(fn ToolConfirmationFunc) {
+	a.onToolConfirm = fn
+}
+
+// FormatToolCall formats a tool call for display, showing the exact command/payload
+func FormatToolCall(call *tools.ToolCall) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("\n\033[1;33m━━━ Tool Call ━━━\033[0m\n"))
+	sb.WriteString(fmt.Sprintf("\033[1;36mTool:\033[0m %s\n", call.Name))
+
+	// Format arguments nicely
+	if len(call.Args) > 0 {
+		sb.WriteString("\033[1;36mPayload:\033[0m\n")
+		for key, val := range call.Args {
+			sb.WriteString(fmt.Sprintf("  %s: %v\n", key, val))
+		}
+	}
+
+	// For shell tool, show the actual command prominently
+	if call.Name == "shell" {
+		if cmd, ok := call.Args["command"].(string); ok {
+			sb.WriteString(fmt.Sprintf("\n\033[1;32m▶ Executing:\033[0m %s\n", cmd))
+		}
+	}
+
+	return sb.String()
+}
+
+// DefaultToolConfirmation is the default confirmation function for interactive mode
+func DefaultToolConfirmation(call *tools.ToolCall) bool {
+	fmt.Print(FormatToolCall(call))
+	fmt.Print("\033[1;33mAllow execution? [y/N]: \033[0m")
+
+	reader := bufio.NewReader(os.Stdin)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		return false
+	}
+
+	response = strings.TrimSpace(strings.ToLower(response))
+	return response == "y" || response == "yes"
 }
 
 // SetConversation sets or creates a conversation
@@ -249,6 +301,20 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string, onChunk func(s
 				continue
 			}
 
+			// Request confirmation before execution
+			if a.onToolConfirm != nil {
+				if !a.onToolConfirm(call) {
+					// User denied execution
+					fullMessages = append(fullMessages, llm.Message{
+						Role:       "tool",
+						ToolCallID: tc.ID,
+						Name:       tc.Function.Name,
+						Content:    "Tool execution denied by user",
+					})
+					continue
+				}
+			}
+
 			// Execute tool
 			result := a.tools.Execute(ctx, call)
 
@@ -373,6 +439,10 @@ func (a *Agent) UnregisterSkill(id string) error {
 // Interactive starts an interactive REPL session
 func (a *Agent) Interactive(ctx context.Context) error {
 	a.log.Info("starting interactive session", "conversation", a.conversationID)
+
+	// Set up default tool confirmation
+	a.SetToolConfirmation(DefaultToolConfirmation)
+
 	fmt.Printf("%s ready. Type your message (Ctrl+C to exit).\n", a.config.Agent.Name)
 
 	sigChan := make(chan os.Signal, 1)
