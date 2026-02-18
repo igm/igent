@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chzyer/readline"
 	"github.com/igm/igent/internal/config"
 	"github.com/igm/igent/internal/llm"
 	"github.com/igm/igent/internal/logger"
@@ -443,7 +444,7 @@ func (a *Agent) Interactive(ctx context.Context) error {
 	// Set up default tool confirmation
 	a.SetToolConfirmation(DefaultToolConfirmation)
 
-	fmt.Printf("%s ready. Type your message (Ctrl+C to exit).\n", a.config.Agent.Name)
+	fmt.Printf("%s ready. Type your message (Ctrl+C or /exit to exit).\n", a.config.Agent.Name)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -454,28 +455,40 @@ func (a *Agent) Interactive(ctx context.Context) error {
 		os.Exit(0)
 	}()
 
-	scanner := bufio.NewScanner(os.Stdin)
+	// Initialize readline with history support
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          "> ",
+		HistoryFile:     "/tmp/.igent_history",
+		AutoComplete:    nil,
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+	})
+	if err != nil {
+		return fmt.Errorf("initializing readline: %w", err)
+	}
+	defer rl.Close()
 
 	for {
-		fmt.Print("> ")
-		if !scanner.Scan() {
+		line, err := rl.Readline()
+		if err != nil {
+			// Handle Ctrl+D (EOF) or Ctrl+C
 			break
 		}
 
-		input := strings.TrimSpace(scanner.Text())
+		input := strings.TrimSpace(line)
 		if input == "" {
 			continue
 		}
 
 		// Handle special commands
 		if strings.HasPrefix(input, "/") {
-			a.handleCommand(ctx, input)
+			a.handleCommand(ctx, input, rl)
 			continue
 		}
 
 		// Send to LLM and stream response
 		fmt.Print("\n")
-		_, err := a.ChatStream(ctx, input, func(chunk string) {
+		_, err = a.ChatStream(ctx, input, func(chunk string) {
 			fmt.Print(chunk)
 		})
 		if err != nil {
@@ -485,11 +498,12 @@ func (a *Agent) Interactive(ctx context.Context) error {
 		fmt.Print("\n\n")
 	}
 
-	return scanner.Err()
+	fmt.Println("Goodbye!")
+	return nil
 }
 
 // handleCommand processes slash commands
-func (a *Agent) handleCommand(ctx context.Context, input string) {
+func (a *Agent) handleCommand(ctx context.Context, input string, rl *readline.Instance) {
 	parts := strings.Fields(input)
 	cmd := parts[0]
 
@@ -506,7 +520,10 @@ func (a *Agent) handleCommand(ctx context.Context, input string) {
   /skills        - List skills
   /tools         - List available tools
   /clear         - Clear screen
-  /exit          - Exit`)
+  /exit          - Exit
+
+Navigation:
+  UP/DOWN arrows - Navigate through message history`)
 
 	case "/new":
 		name := "default"
@@ -599,6 +616,7 @@ func (a *Agent) handleCommand(ctx context.Context, input string) {
 		fmt.Print("\033[2J\033[H")
 
 	case "/exit":
+		rl.Close()
 		fmt.Println("Goodbye!")
 		os.Exit(0)
 
