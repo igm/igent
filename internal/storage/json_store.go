@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -216,6 +217,67 @@ func (s *JSONStore) DeleteMemory(id string) error {
 
 	s.log.Info("memory deleted", "id", id)
 	return nil
+}
+
+// UpdateMemory updates an existing memory item with the provided fields
+func (s *JSONStore) UpdateMemory(id string, updates map[string]interface{}) (*MemoryItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path := filepath.Join(s.baseDir, "memory", id+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("reading memory: %w", err)
+	}
+
+	var item MemoryItem
+	if err := json.Unmarshal(data, &item); err != nil {
+		return nil, fmt.Errorf("unmarshaling memory: %w", err)
+	}
+
+	// Apply updates
+	if content, ok := updates["content"].(string); ok {
+		item.Content = content
+	}
+	if memType, ok := updates["type"].(string); ok {
+		item.Type = memType
+	}
+	if relevance, ok := updates["relevance"].(float64); ok {
+		item.Relevance = relevance
+	}
+
+	// Save updated item
+	updatedData, err := json.MarshalIndent(&item, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshaling memory: %w", err)
+	}
+
+	if err := os.WriteFile(path, updatedData, 0644); err != nil {
+		return nil, err
+	}
+
+	s.log.Debug("memory updated", "id", id)
+	return &item, nil
+}
+
+// FindMemoryByContent finds a memory by fuzzy content matching (case-insensitive substring)
+func (s *JSONStore) FindMemoryByContent(searchText string) (*MemoryItem, error) {
+	memories, err := s.LoadMemories()
+	if err != nil {
+		return nil, err
+	}
+
+	searchLower := strings.ToLower(searchText)
+	for _, mem := range memories {
+		if strings.Contains(strings.ToLower(mem.Content), searchLower) {
+			return mem, nil
+		}
+	}
+
+	return nil, ErrNotFound
 }
 
 // SaveSkill stores a skill

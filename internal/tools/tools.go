@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/igm/igent/internal/logger"
+	"github.com/igm/igent/internal/storage"
 )
 
 // Tool represents a tool that can be called by the LLM
@@ -39,18 +40,32 @@ type ToolResult struct {
 
 // Registry manages available tools
 type Registry struct {
-	tools map[string]*Tool
-	log   *slog.Logger
+	tools     map[string]*Tool
+	store     *storage.JSONStore
+	safeTools map[string]bool // Tools that don't require user confirmation
+	log       *slog.Logger
 }
 
 // NewRegistry creates a new tool registry with default tools
 func NewRegistry() *Registry {
 	r := &Registry{
-		tools: make(map[string]*Tool),
-		log:   logger.L().With("component", "tools"),
+		tools:     make(map[string]*Tool),
+		safeTools: make(map[string]bool),
+		log:       logger.L().With("component", "tools"),
 	}
 	r.registerDefaults()
 	return r
+}
+
+// SetStorage sets the storage backend for tools that need it
+func (r *Registry) SetStorage(store *storage.JSONStore) {
+	r.store = store
+	r.registerMemoryTools()
+}
+
+// IsSafeTool returns true if the tool doesn't require user confirmation
+func (r *Registry) IsSafeTool(name string) bool {
+	return r.safeTools[name]
 }
 
 // Register adds a tool to the registry
@@ -618,4 +633,279 @@ func getBool(args map[string]interface{}, key string, def bool) bool {
 		return v
 	}
 	return def
+}
+
+// registerMemoryTools registers the memory management tools
+func (r *Registry) registerMemoryTools() {
+	if r.store == nil {
+		return
+	}
+
+	// memory_add - Store new memory
+	r.Register(&Tool{
+		Name:        "memory_add",
+		Description: "Store a new memory item. Use this to remember important facts, preferences, or context about the user.",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"content": map[string]interface{}{
+					"type":        "string",
+					"description": "The content to remember",
+				},
+				"type": map[string]interface{}{
+					"type":        "string",
+					"description": "Type of memory: fact, preference, or context",
+					"enum":        []string{"fact", "preference", "context"},
+				},
+				"relevance": map[string]interface{}{
+					"type":        "number",
+					"description": "Relevance score 0-1 (default: 0.8)",
+				},
+			},
+			"required": []string{"content", "type"},
+		},
+		Executor: func(args map[string]interface{}) (string, error) {
+			content, ok := args["content"].(string)
+			if !ok || content == "" {
+				return "", fmt.Errorf("content is required")
+			}
+
+			memType, ok := args["type"].(string)
+			if !ok || memType == "" {
+				memType = "fact"
+			}
+			if memType != "fact" && memType != "preference" && memType != "context" {
+				memType = "fact"
+			}
+
+			relevance := 0.8
+			if rel, ok := args["relevance"].(float64); ok && rel >= 0 && rel <= 1 {
+				relevance = rel
+			}
+
+			memory := &storage.MemoryItem{
+				ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
+				Content:   content,
+				Type:      memType,
+				CreatedAt: time.Now(),
+				Relevance: relevance,
+			}
+
+			if err := r.store.SaveMemory(memory); err != nil {
+				return "", fmt.Errorf("failed to save memory: %w", err)
+			}
+
+			return fmt.Sprintf("Memory stored successfully (id: %s, type: %s)", memory.ID, memory.Type), nil
+		},
+	})
+	r.safeTools["memory_add"] = true
+
+	// memory_list - List all memories
+	r.Register(&Tool{
+		Name:        "memory_list",
+		Description: "List all stored memories. Shows all facts, preferences, and context items.",
+		Parameters: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+		Executor: func(args map[string]interface{}) (string, error) {
+			memories, err := r.store.LoadMemories()
+			if err != nil {
+				return "", fmt.Errorf("failed to load memories: %w", err)
+			}
+
+			if len(memories) == 0 {
+				return "No memories stored.", nil
+			}
+
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("Found %d memories:\n\n", len(memories)))
+			for _, mem := range memories {
+				sb.WriteString(fmt.Sprintf("- [%s] (id: %s, relevance: %.1f) %s\n", mem.Type, mem.ID, mem.Relevance, mem.Content))
+			}
+			return sb.String(), nil
+		},
+	})
+	r.safeTools["memory_list"] = true
+
+	// memory_search - Find memories by keyword
+	r.Register(&Tool{
+		Name:        "memory_search",
+		Description: "Search for memories containing specific keywords or text.",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "Search query - finds memories containing this text",
+				},
+			},
+			"required": []string{"query"},
+		},
+		Executor: func(args map[string]interface{}) (string, error) {
+			query, ok := args["query"].(string)
+			if !ok || query == "" {
+				return "", fmt.Errorf("query is required")
+			}
+
+			memories, err := r.store.LoadMemories()
+			if err != nil {
+				return "", fmt.Errorf("failed to load memories: %w", err)
+			}
+
+			queryLower := strings.ToLower(query)
+			var matches []*storage.MemoryItem
+			for _, mem := range memories {
+				if strings.Contains(strings.ToLower(mem.Content), queryLower) {
+					matches = append(matches, mem)
+				}
+			}
+
+			if len(matches) == 0 {
+				return fmt.Sprintf("No memories found matching '%s'.", query), nil
+			}
+
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("Found %d memories matching '%s':\n\n", len(matches), query))
+			for _, mem := range matches {
+				sb.WriteString(fmt.Sprintf("- [%s] (id: %s) %s\n", mem.Type, mem.ID, mem.Content))
+			}
+			return sb.String(), nil
+		},
+	})
+	r.safeTools["memory_search"] = true
+
+	// memory_update - Update memory by ID or content match
+	r.Register(&Tool{
+		Name:        "memory_update",
+		Description: "Update an existing memory. Can find memory by ID or by matching content.",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id": map[string]interface{}{
+					"type":        "string",
+					"description": "Memory ID to update (optional if using search)",
+				},
+				"search": map[string]interface{}{
+					"type":        "string",
+					"description": "Search text to find memory to update (used if no ID provided)",
+				},
+				"content": map[string]interface{}{
+					"type":        "string",
+					"description": "New content for the memory",
+				},
+				"type": map[string]interface{}{
+					"type":        "string",
+					"description": "New type: fact, preference, or context",
+					"enum":        []string{"fact", "preference", "context"},
+				},
+				"relevance": map[string]interface{}{
+					"type":        "number",
+					"description": "New relevance score 0-1",
+				},
+			},
+		},
+		Executor: func(args map[string]interface{}) (string, error) {
+			id, _ := args["id"].(string)
+			search, _ := args["search"].(string)
+
+			if id == "" && search == "" {
+				return "", fmt.Errorf("either id or search is required")
+			}
+
+			// Find the memory
+			var memory *storage.MemoryItem
+			var err error
+
+			if id != "" {
+				// Find by ID - need to load and match
+				memories, loadErr := r.store.LoadMemories()
+				if loadErr != nil {
+					return "", fmt.Errorf("failed to load memories: %w", loadErr)
+				}
+				for _, mem := range memories {
+					if mem.ID == id {
+						memory = mem
+						break
+					}
+				}
+				if memory == nil {
+					return "", fmt.Errorf("memory with id '%s' not found", id)
+				}
+			} else {
+				// Find by search
+				memory, err = r.store.FindMemoryByContent(search)
+				if err != nil {
+					return "", fmt.Errorf("memory not found matching '%s'", search)
+				}
+			}
+
+			// Build updates
+			updates := make(map[string]interface{})
+			if content, ok := args["content"].(string); ok && content != "" {
+				updates["content"] = content
+			}
+			if memType, ok := args["type"].(string); ok && memType != "" {
+				updates["type"] = memType
+			}
+			if relevance, ok := args["relevance"].(float64); ok && relevance >= 0 && relevance <= 1 {
+				updates["relevance"] = relevance
+			}
+
+			if len(updates) == 0 {
+				return "", fmt.Errorf("no updates provided")
+			}
+
+			updated, err := r.store.UpdateMemory(memory.ID, updates)
+			if err != nil {
+				return "", fmt.Errorf("failed to update memory: %w", err)
+			}
+
+			return fmt.Sprintf("Memory updated successfully (id: %s): [%s] %s", updated.ID, updated.Type, updated.Content), nil
+		},
+	})
+	r.safeTools["memory_update"] = true
+
+	// memory_delete - Delete memory by ID or content match
+	r.Register(&Tool{
+		Name:        "memory_delete",
+		Description: "Delete a memory. Can find memory by ID or by matching content.",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id": map[string]interface{}{
+					"type":        "string",
+					"description": "Memory ID to delete (optional if using search)",
+				},
+				"search": map[string]interface{}{
+					"type":        "string",
+					"description": "Search text to find memory to delete (used if no ID provided)",
+				},
+			},
+		},
+		Executor: func(args map[string]interface{}) (string, error) {
+			id, _ := args["id"].(string)
+			search, _ := args["search"].(string)
+
+			if id == "" && search == "" {
+				return "", fmt.Errorf("either id or search is required")
+			}
+
+			// Find the memory if using search
+			if id == "" {
+				memory, err := r.store.FindMemoryByContent(search)
+				if err != nil {
+					return "", fmt.Errorf("memory not found matching '%s'", search)
+				}
+				id = memory.ID
+			}
+
+			if err := r.store.DeleteMemory(id); err != nil {
+				return "", fmt.Errorf("failed to delete memory: %w", err)
+			}
+
+			return fmt.Sprintf("Memory deleted successfully (id: %s)", id), nil
+		},
+	})
+	r.safeTools["memory_delete"] = true
 }

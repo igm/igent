@@ -195,3 +195,210 @@ func TestSkillCRUD(t *testing.T) {
 		t.Errorf("expected 0 skills after delete, got %d", len(skills))
 	}
 }
+
+func TestUpdateMemory(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "igent-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewJSONStore(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	// Create a memory
+	mem := &MemoryItem{
+		ID:        "test-update-mem",
+		Content:   "Original content",
+		Type:      "fact",
+		CreatedAt: time.Now(),
+		Relevance: 0.5,
+	}
+	if err := store.SaveMemory(mem); err != nil {
+		t.Fatalf("failed to save memory: %v", err)
+	}
+
+	// Update content
+	updates := map[string]interface{}{
+		"content":   "Updated content",
+		"relevance": 0.9,
+	}
+	updated, err := store.UpdateMemory("test-update-mem", updates)
+	if err != nil {
+		t.Fatalf("failed to update memory: %v", err)
+	}
+
+	if updated.Content != "Updated content" {
+		t.Errorf("expected content 'Updated content', got %s", updated.Content)
+	}
+	if updated.Relevance != 0.9 {
+		t.Errorf("expected relevance 0.9, got %f", updated.Relevance)
+	}
+	if updated.Type != "fact" {
+		t.Errorf("expected type 'fact' to remain unchanged, got %s", updated.Type)
+	}
+
+	// Verify persistence
+	memories, _ := store.LoadMemories()
+	if len(memories) != 1 {
+		t.Fatalf("expected 1 memory, got %d", len(memories))
+	}
+	if memories[0].Content != "Updated content" {
+		t.Errorf("expected persisted content 'Updated content', got %s", memories[0].Content)
+	}
+}
+
+func TestUpdateMemory_Type(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "igent-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewJSONStore(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	// Create a memory
+	mem := &MemoryItem{
+		ID:        "test-update-type",
+		Content:   "Test content",
+		Type:      "fact",
+		CreatedAt: time.Now(),
+		Relevance: 0.5,
+	}
+	store.SaveMemory(mem)
+
+	// Update type
+	updates := map[string]interface{}{
+		"type": "preference",
+	}
+	updated, err := store.UpdateMemory("test-update-type", updates)
+	if err != nil {
+		t.Fatalf("failed to update memory: %v", err)
+	}
+
+	if updated.Type != "preference" {
+		t.Errorf("expected type 'preference', got %s", updated.Type)
+	}
+}
+
+func TestUpdateMemory_NotFound(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "igent-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewJSONStore(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	updates := map[string]interface{}{"content": "new content"}
+	_, err = store.UpdateMemory("nonexistent", updates)
+	if err != ErrNotFound {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestFindMemoryByContent(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "igent-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewJSONStore(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	// Create some memories
+	memories := []*MemoryItem{
+		{ID: "mem1", Content: "User prefers dark mode", Type: "preference", CreatedAt: time.Now(), Relevance: 0.9},
+		{ID: "mem2", Content: "User's name is Alice", Type: "fact", CreatedAt: time.Now(), Relevance: 0.8},
+		{ID: "mem3", Content: "Working on a Go project", Type: "context", CreatedAt: time.Now(), Relevance: 0.7},
+	}
+	for _, mem := range memories {
+		store.SaveMemory(mem)
+	}
+
+	// Test exact match
+	found, err := store.FindMemoryByContent("dark mode")
+	if err != nil {
+		t.Fatalf("failed to find memory: %v", err)
+	}
+	if found.ID != "mem1" {
+		t.Errorf("expected mem1, got %s", found.ID)
+	}
+
+	// Test case-insensitive
+	found, err = store.FindMemoryByContent("DARK MODE")
+	if err != nil {
+		t.Fatalf("failed to find memory (case-insensitive): %v", err)
+	}
+	if found.ID != "mem1" {
+		t.Errorf("expected mem1 for case-insensitive search, got %s", found.ID)
+	}
+
+	// Test partial match
+	found, err = store.FindMemoryByContent("Alice")
+	if err != nil {
+		t.Fatalf("failed to find memory (partial): %v", err)
+	}
+	if found.ID != "mem2" {
+		t.Errorf("expected mem2 for partial match, got %s", found.ID)
+	}
+}
+
+func TestFindMemoryByContent_NotFound(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "igent-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewJSONStore(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	// Create a memory
+	mem := &MemoryItem{
+		ID:        "mem1",
+		Content:   "Some content",
+		Type:      "fact",
+		CreatedAt: time.Now(),
+		Relevance: 0.5,
+	}
+	store.SaveMemory(mem)
+
+	// Search for non-existent content
+	_, err = store.FindMemoryByContent("nonexistent")
+	if err != ErrNotFound {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestFindMemoryByContent_Empty(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "igent-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewJSONStore(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	// Search with no memories stored
+	_, err = store.FindMemoryByContent("anything")
+	if err != ErrNotFound {
+		t.Errorf("expected ErrNotFound for empty store, got %v", err)
+	}
+}

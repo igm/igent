@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/igm/igent/internal/storage"
 )
 
 func TestNewRegistry(t *testing.T) {
@@ -786,5 +788,671 @@ func TestDateTool_CustomFormat(t *testing.T) {
 	// Check that output looks like YYYY-MM-DD
 	if len(result.Output) != 10 {
 		t.Errorf("expected 10 chars for YYYY-MM-DD format, got %d: %s", len(result.Output), result.Output)
+	}
+}
+
+// Memory Tools Tests
+
+func setupMemoryTest(t *testing.T) (*Registry, *storage.JSONStore, string) {
+	tmpDir, err := os.MkdirTemp("", "igent-memory-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+
+	store, err := storage.NewJSONStore(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	registry := NewRegistry()
+	registry.SetStorage(store)
+
+	return registry, store, tmpDir
+}
+
+func TestMemoryAdd(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	call := &ToolCall{
+		ID:   "test-memory-add",
+		Name: "memory_add",
+		Args: map[string]interface{}{
+			"content":   "User prefers dark mode",
+			"type":      "preference",
+			"relevance": 0.9,
+		},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "Memory stored successfully") {
+		t.Errorf("expected success message, got: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "preference") {
+		t.Errorf("expected type in output, got: %s", result.Output)
+	}
+}
+
+func TestMemoryAdd_Defaults(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	call := &ToolCall{
+		ID:   "test-memory-add-defaults",
+		Name: "memory_add",
+		Args: map[string]interface{}{
+			"content": "Test fact",
+			"type":    "fact",
+		},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "Memory stored successfully") {
+		t.Errorf("expected success message, got: %s", result.Output)
+	}
+}
+
+func TestMemoryAdd_MissingContent(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	call := &ToolCall{
+		ID:   "test-memory-add-no-content",
+		Name: "memory_add",
+		Args: map[string]interface{}{
+			"type": "fact",
+		},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error == "" {
+		t.Error("expected error for missing content")
+	}
+}
+
+func TestMemoryAdd_InvalidType(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	call := &ToolCall{
+		ID:   "test-memory-add-invalid-type",
+		Name: "memory_add",
+		Args: map[string]interface{}{
+			"content": "Test content",
+			"type":    "invalid_type",
+		},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	// Should default to "fact"
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "fact") {
+		t.Errorf("expected type to default to 'fact', got: %s", result.Output)
+	}
+}
+
+func TestMemoryList(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	// Add some memories first
+	registry.Execute(context.Background(), &ToolCall{
+		ID:   "add1",
+		Name: "memory_add",
+		Args: map[string]interface{}{"content": "First memory", "type": "fact"},
+	})
+	registry.Execute(context.Background(), &ToolCall{
+		ID:   "add2",
+		Name: "memory_add",
+		Args: map[string]interface{}{"content": "Second memory", "type": "preference"},
+	})
+
+	call := &ToolCall{
+		ID:   "test-memory-list",
+		Name: "memory_list",
+		Args: map[string]interface{}{},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "First memory") {
+		t.Errorf("expected 'First memory' in output, got: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "Second memory") {
+		t.Errorf("expected 'Second memory' in output, got: %s", result.Output)
+	}
+}
+
+func TestMemoryList_Empty(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	call := &ToolCall{
+		ID:   "test-memory-list-empty",
+		Name: "memory_list",
+		Args: map[string]interface{}{},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "No memories") {
+		t.Errorf("expected 'No memories' message, got: %s", result.Output)
+	}
+}
+
+func TestMemorySearch(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	// Add some memories
+	registry.Execute(context.Background(), &ToolCall{
+		ID:   "add1",
+		Name: "memory_add",
+		Args: map[string]interface{}{"content": "User prefers dark mode", "type": "preference"},
+	})
+	registry.Execute(context.Background(), &ToolCall{
+		ID:   "add2",
+		Name: "memory_add",
+		Args: map[string]interface{}{"content": "User's name is Alice", "type": "fact"},
+	})
+
+	call := &ToolCall{
+		ID:   "test-memory-search",
+		Name: "memory_search",
+		Args: map[string]interface{}{"query": "dark mode"},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "dark mode") {
+		t.Errorf("expected 'dark mode' in output, got: %s", result.Output)
+	}
+	if strings.Contains(result.Output, "Alice") {
+		t.Errorf("should not contain 'Alice', got: %s", result.Output)
+	}
+}
+
+func TestMemorySearch_CaseInsensitive(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	registry.Execute(context.Background(), &ToolCall{
+		ID:   "add1",
+		Name: "memory_add",
+		Args: map[string]interface{}{"content": "Dark Mode", "type": "preference"},
+	})
+
+	call := &ToolCall{
+		ID:   "test-memory-search-case",
+		Name: "memory_search",
+		Args: map[string]interface{}{"query": "DARK MODE"},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "Found") {
+		t.Errorf("expected 'Found' in output, got: %s", result.Output)
+	}
+}
+
+func TestMemorySearch_NotFound(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	registry.Execute(context.Background(), &ToolCall{
+		ID:   "add1",
+		Name: "memory_add",
+		Args: map[string]interface{}{"content": "Some content", "type": "fact"},
+	})
+
+	call := &ToolCall{
+		ID:   "test-memory-search-notfound",
+		Name: "memory_search",
+		Args: map[string]interface{}{"query": "nonexistent"},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "No memories found") {
+		t.Errorf("expected 'No memories found' message, got: %s", result.Output)
+	}
+}
+
+func TestMemorySearch_MissingQuery(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	call := &ToolCall{
+		ID:   "test-memory-search-noquery",
+		Name: "memory_search",
+		Args: map[string]interface{}{},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error == "" {
+		t.Error("expected error for missing query")
+	}
+}
+
+func TestMemoryUpdate_ById(t *testing.T) {
+	registry, store, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	// Add a memory first
+	registry.Execute(context.Background(), &ToolCall{
+		ID:   "add1",
+		Name: "memory_add",
+		Args: map[string]interface{}{"content": "Original content", "type": "fact"},
+	})
+
+	// Get the ID
+	memories, _ := store.LoadMemories()
+	memID := memories[0].ID
+
+	call := &ToolCall{
+		ID:   "test-memory-update-id",
+		Name: "memory_update",
+		Args: map[string]interface{}{
+			"id":      memID,
+			"content": "Updated content",
+		},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "updated successfully") {
+		t.Errorf("expected success message, got: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "Updated content") {
+		t.Errorf("expected updated content in output, got: %s", result.Output)
+	}
+}
+
+func TestMemoryUpdate_BySearch(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	// Add a memory first
+	registry.Execute(context.Background(), &ToolCall{
+		ID:   "add1",
+		Name: "memory_add",
+		Args: map[string]interface{}{"content": "User prefers dark mode", "type": "preference"},
+	})
+
+	call := &ToolCall{
+		ID:   "test-memory-update-search",
+		Name: "memory_update",
+		Args: map[string]interface{}{
+			"search":  "dark mode",
+			"content": "User prefers light mode",
+		},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "light mode") {
+		t.Errorf("expected updated content in output, got: %s", result.Output)
+	}
+}
+
+func TestMemoryUpdate_NotFound(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	call := &ToolCall{
+		ID:   "test-memory-update-notfound",
+		Name: "memory_update",
+		Args: map[string]interface{}{
+			"id":      "nonexistent",
+			"content": "Updated content",
+		},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error == "" {
+		t.Error("expected error for nonexistent memory")
+	}
+}
+
+func TestMemoryUpdate_NoIdOrSearch(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	call := &ToolCall{
+		ID:   "test-memory-update-noargs",
+		Name: "memory_update",
+		Args: map[string]interface{}{
+			"content": "Updated content",
+		},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error == "" {
+		t.Error("expected error when no id or search provided")
+	}
+}
+
+func TestMemoryUpdate_NoUpdates(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	// Add a memory first
+	registry.Execute(context.Background(), &ToolCall{
+		ID:   "add1",
+		Name: "memory_add",
+		Args: map[string]interface{}{"content": "Original content", "type": "fact"},
+	})
+
+	call := &ToolCall{
+		ID:   "test-memory-update-noupdates",
+		Name: "memory_update",
+		Args: map[string]interface{}{
+			"search": "Original",
+		},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error == "" {
+		t.Error("expected error when no updates provided")
+	}
+}
+
+func TestMemoryDelete_ById(t *testing.T) {
+	registry, store, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	// Add a memory first
+	registry.Execute(context.Background(), &ToolCall{
+		ID:   "add1",
+		Name: "memory_add",
+		Args: map[string]interface{}{"content": "Memory to delete", "type": "fact"},
+	})
+
+	memories, _ := store.LoadMemories()
+	memID := memories[0].ID
+
+	call := &ToolCall{
+		ID:   "test-memory-delete-id",
+		Name: "memory_delete",
+		Args: map[string]interface{}{
+			"id": memID,
+		},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "deleted successfully") {
+		t.Errorf("expected success message, got: %s", result.Output)
+	}
+
+	// Verify deletion
+	memories, _ = store.LoadMemories()
+	if len(memories) != 0 {
+		t.Errorf("expected 0 memories after delete, got %d", len(memories))
+	}
+}
+
+func TestMemoryDelete_BySearch(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	// Add a memory first
+	registry.Execute(context.Background(), &ToolCall{
+		ID:   "add1",
+		Name: "memory_add",
+		Args: map[string]interface{}{"content": "Memory to delete", "type": "fact"},
+	})
+
+	call := &ToolCall{
+		ID:   "test-memory-delete-search",
+		Name: "memory_delete",
+		Args: map[string]interface{}{
+			"search": "delete",
+		},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "deleted successfully") {
+		t.Errorf("expected success message, got: %s", result.Output)
+	}
+}
+
+func TestMemoryDelete_NotFound(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	call := &ToolCall{
+		ID:   "test-memory-delete-notfound",
+		Name: "memory_delete",
+		Args: map[string]interface{}{
+			"id": "nonexistent",
+		},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error == "" {
+		t.Error("expected error for nonexistent memory")
+	}
+}
+
+func TestMemoryDelete_NoIdOrSearch(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	call := &ToolCall{
+		ID:   "test-memory-delete-noargs",
+		Name: "memory_delete",
+		Args: map[string]interface{}{},
+	}
+
+	result := registry.Execute(context.Background(), call)
+
+	if result.Error == "" {
+		t.Error("expected error when no id or search provided")
+	}
+}
+
+func TestIsSafeTool(t *testing.T) {
+	registry, _, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	// Memory tools should be safe
+	if !registry.IsSafeTool("memory_add") {
+		t.Error("memory_add should be a safe tool")
+	}
+	if !registry.IsSafeTool("memory_list") {
+		t.Error("memory_list should be a safe tool")
+	}
+	if !registry.IsSafeTool("memory_search") {
+		t.Error("memory_search should be a safe tool")
+	}
+	if !registry.IsSafeTool("memory_update") {
+		t.Error("memory_update should be a safe tool")
+	}
+	if !registry.IsSafeTool("memory_delete") {
+		t.Error("memory_delete should be a safe tool")
+	}
+
+	// Shell tool should NOT be safe
+	if registry.IsSafeTool("shell") {
+		t.Error("shell should NOT be a safe tool")
+	}
+}
+
+func TestSetStorage(t *testing.T) {
+	registry := NewRegistry()
+
+	// Without storage, memory tools should not be registered
+	if _, ok := registry.Get("memory_add"); ok {
+		t.Error("memory_add should not be registered without storage")
+	}
+
+	// Create temp storage
+	tmpDir, err := os.MkdirTemp("", "igent-storage-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := storage.NewJSONStore(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	// Set storage
+	registry.SetStorage(store)
+
+	// Now memory tools should be registered
+	if _, ok := registry.Get("memory_add"); !ok {
+		t.Error("memory_add should be registered after SetStorage")
+	}
+	if _, ok := registry.Get("memory_list"); !ok {
+		t.Error("memory_list should be registered after SetStorage")
+	}
+}
+
+func TestMemoryToolsWithoutStorage(t *testing.T) {
+	// Test that memory tools are not registered without storage
+	registry := NewRegistry()
+
+	// Memory tools should not exist
+	if _, ok := registry.Get("memory_add"); ok {
+		t.Error("memory_add should not be registered without storage")
+	}
+
+	// Other tools should still work
+	if _, ok := registry.Get("echo"); !ok {
+		t.Error("echo should still be available")
+	}
+}
+
+func TestMemoryEndToEnd(t *testing.T) {
+	// End-to-end test: add, list, search, update, delete
+	registry, store, tmpDir := setupMemoryTest(t)
+	defer os.RemoveAll(tmpDir)
+
+	// 1. Add a memory
+	addResult := registry.Execute(context.Background(), &ToolCall{
+		ID:   "add",
+		Name: "memory_add",
+		Args: map[string]interface{}{
+			"content":   "User prefers Go programming",
+			"type":      "preference",
+			"relevance": 0.9,
+		},
+	})
+	if addResult.Error != "" {
+		t.Fatalf("failed to add memory: %s", addResult.Error)
+	}
+
+	// 2. List memories
+	listResult := registry.Execute(context.Background(), &ToolCall{
+		ID:   "list",
+		Name: "memory_list",
+		Args: map[string]interface{}{},
+	})
+	if listResult.Error != "" {
+		t.Fatalf("failed to list memories: %s", listResult.Error)
+	}
+	if !strings.Contains(listResult.Output, "Go programming") {
+		t.Errorf("list should contain 'Go programming', got: %s", listResult.Output)
+	}
+
+	// 3. Search for the memory
+	searchResult := registry.Execute(context.Background(), &ToolCall{
+		ID:   "search",
+		Name: "memory_search",
+		Args: map[string]interface{}{"query": "Go"},
+	})
+	if searchResult.Error != "" {
+		t.Fatalf("failed to search memories: %s", searchResult.Error)
+	}
+	if !strings.Contains(searchResult.Output, "Go programming") {
+		t.Errorf("search should contain 'Go programming', got: %s", searchResult.Output)
+	}
+
+	// 4. Update the memory
+	updateResult := registry.Execute(context.Background(), &ToolCall{
+		ID:   "update",
+		Name: "memory_update",
+		Args: map[string]interface{}{
+			"search":  "Go programming",
+			"content": "User prefers Rust programming",
+		},
+	})
+	if updateResult.Error != "" {
+		t.Fatalf("failed to update memory: %s", updateResult.Error)
+	}
+
+	// 5. Verify update
+	updatedMemories, _ := store.LoadMemories()
+	if len(updatedMemories) != 1 {
+		t.Fatalf("expected 1 memory, got %d", len(updatedMemories))
+	}
+	if !strings.Contains(updatedMemories[0].Content, "Rust") {
+		t.Errorf("memory should be updated to Rust, got: %s", updatedMemories[0].Content)
+	}
+
+	// 6. Delete the memory
+	deleteResult := registry.Execute(context.Background(), &ToolCall{
+		ID:   "delete",
+		Name: "memory_delete",
+		Args: map[string]interface{}{
+			"search": "Rust",
+		},
+	})
+	if deleteResult.Error != "" {
+		t.Fatalf("failed to delete memory: %s", deleteResult.Error)
+	}
+
+	// 7. Verify deletion
+	finalMemories, _ := store.LoadMemories()
+	if len(finalMemories) != 0 {
+		t.Errorf("expected 0 memories after delete, got %d", len(finalMemories))
 	}
 }

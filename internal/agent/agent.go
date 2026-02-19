@@ -107,6 +107,7 @@ func New(cfg *config.Config) (*Agent, error) {
 
 	// Initialize tools registry
 	toolRegistry := tools.NewRegistry()
+	toolRegistry.SetStorage(store) // Enable memory tools
 	log.Debug("tools registry initialized", "tool_count", len(toolRegistry.List()))
 
 	log.Info("agent ready", "name", cfg.Agent.Name)
@@ -208,6 +209,38 @@ func (a *Agent) buildSystemPrompt() string {
 	prompt := a.config.Agent.SystemPrompt
 	prompt += fmt.Sprintf("\n\nCurrent date and time: %s", dateTime)
 
+	// Add memory management instructions
+	prompt += `
+
+## Memory Management
+
+You have access to persistent memory. You are responsible for managing it using the available tools.
+
+### Available Tools
+- memory_add: Store new memories (content, type, relevance)
+- memory_list: List all stored memories
+- memory_search: Find memories by keyword
+- memory_update: Update existing memories
+- memory_delete: Remove memories
+
+### When to Use Memory
+- Store important facts about the user (name, preferences, context)
+- Remember user preferences (coding style, communication style, etc.)
+- Keep track of ongoing projects or tasks
+- Remember decisions made in previous conversations
+
+### When to Update Memory
+- When user corrects or changes their preferences
+- When outdated information needs to be replaced
+- When context changes significantly
+
+### When to Delete Memory
+- When information is no longer relevant
+- When user explicitly asks to forget something
+- When memories become outdated or incorrect
+
+Be selective - not everything needs to be remembered. Focus on information that will be useful in future conversations.`
+
 	a.log.Debug("system prompt built", "datetime", dateTime)
 
 	return prompt
@@ -305,8 +338,8 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string, onChunk func(s
 				continue
 			}
 
-			// Request confirmation before execution
-			if a.onToolConfirm != nil {
+			// Request confirmation before execution (skip for safe tools)
+			if a.onToolConfirm != nil && !a.tools.IsSafeTool(call.Name) {
 				if !a.onToolConfirm(call) {
 					// User denied execution - stop and return to input
 					return "", ErrToolDenied

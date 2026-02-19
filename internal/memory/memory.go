@@ -217,9 +217,6 @@ func (m *Manager) summarizeConversation(conv *storage.Conversation) {
 		"summary_length", len(resp.Content),
 		"duration_ms", time.Since(startTime).Milliseconds(),
 	)
-
-	// Store important facts as memories
-	m.extractMemories(conv, toSummarize)
 }
 
 // formatMessagesForSummary formats messages for summarization
@@ -229,76 +226,6 @@ func formatMessagesForSummary(messages []llm.Message) string {
 		parts = append(parts, fmt.Sprintf("%s: %s", msg.Role, msg.Content))
 	}
 	return strings.Join(parts, "\n\n")
-}
-
-// extractMemories extracts important information from summarized messages
-func (m *Manager) extractMemories(conv *storage.Conversation, messages []llm.Message) {
-	m.log.Debug("extracting memories from summarized messages")
-
-	extractPrompt := []llm.Message{
-		{
-			Role: "system",
-			Content: `Extract important facts, preferences, or context from this conversation that should be remembered for future interactions.
-Return each fact on a new line, prefixed with its type (fact/preference/context).
-Example:
-fact: User's name is Alice
-preference: User prefers concise responses
-context: Working on a Go project`,
-		},
-		{
-			Role:    "user",
-			Content: formatMessagesForSummary(messages),
-		},
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	resp, err := m.provider.Complete(ctx, extractPrompt)
-	if err != nil {
-		m.log.Error("memory extraction failed", "error", err)
-		return
-	}
-
-	// Parse and store memories
-	lines := strings.Split(resp.Content, "\n")
-	extractedCount := 0
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		memType := strings.TrimSpace(parts[0])
-		content := strings.TrimSpace(parts[1])
-
-		if memType != "fact" && memType != "preference" && memType != "context" {
-			memType = "fact"
-		}
-
-		memory := &storage.MemoryItem{
-			ID:        generateID(),
-			Content:   content,
-			Type:      memType,
-			CreatedAt: time.Now(),
-			Relevance: 0.7,
-		}
-
-		if err := m.store.SaveMemory(memory); err != nil {
-			m.log.Error("failed to save memory", "error", err, "type", memType)
-			continue
-		}
-		extractedCount++
-	}
-
-	if extractedCount > 0 {
-		m.log.Info("memories extracted", "count", extractedCount)
-	}
 }
 
 // AddMemory adds a new memory manually
